@@ -32,8 +32,14 @@ export type InboundMessage = {
   authorId: string;
   content: string;
   route: string;
+  transport?: string;
+  authorIsBot?: boolean;
+  webhookId?: string;
   observedAt?: string;
 };
+
+export type Ack = { messageId: string; route: string; accepted: true };
+export type DownstreamInjector = (plaintext: string, messageId: string, route: string) => Promise<Ack>;
 
 export interface TextAdapter {
   readonly transport: string;

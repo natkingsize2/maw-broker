@@ -7,3 +7,5 @@ Policy is explicit: only Nat user `358970717125214209` may resolve a registered 
 Future adapters implement `TextAdapter` for Pipecat, voice, Android, browser, and ESP32. No GitHub repository or remote was created; authority is required before publishing.
 
 Delivery is intentionally **at-least-once**: the downstream injector must be idempotent on `messageId`, and the broker retries `pending` deliveries after restart until an injector acknowledgement is recorded. The phase-1 Discord adapter is normalization-only; transport enforcement and the `verify` command are stubs pending integration, and no migration of existing MAW/Discord state is performed.
+
+The adapter phase keeps this at-least-once/idempotent boundary: `inject` is awaited and must return `{messageId, route, accepted:true}` before resolution. Foreign/non-project messages advance the cursor after denial; configuration, authentication, transport, and injector failures hold it. Audit capacity is deliberately capped at 400 records per process; manual Anvil/Probe audit scans are the acceptance tool while `maw broker verify` remains a stub.

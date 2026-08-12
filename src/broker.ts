@@ -1,6 +1,6 @@
 import { open } from "./crypto";
 import { DurableStore } from "./store";
-import type { BrokerEnvelope, Decision, InboundMessage, Route } from "./types";
+import type { Ack, BrokerEnvelope, Decision, DownstreamInjector, InboundMessage, Route } from "./types";
 import { RouteRegistry } from "./routes";
 
 export const NAT_USER_ID = "358970717125214209";
@@ -11,9 +11,9 @@ export class Broker {
   }
   private readonly routes: RouteRegistry;
 
-  receive(input: InboundMessage, envelope: BrokerEnvelope, decision: Decision, inject: (plaintext: string, messageId: string) => void = () => {}): { status: "resolved" | "replay" | "pending"; plaintext?: string } {
+  async receive(input: InboundMessage, envelope: BrokerEnvelope, decision: Decision, inject: DownstreamInjector = async () => ({ messageId: input.messageId, route: input.route, accepted: true })): Promise<{ status: "resolved" | "replay" | "pending"; plaintext?: string }> {
     if (decision !== "allow" && decision !== "deny") return this.reject(input, "invalid decision");
-    if (!this.routes.has(input.route) || envelope.route !== input.route) return this.reject(input, "wrong route");
+    const registered=this.routes.get(input.route); if (!registered || envelope.route !== input.route || envelope.transport !== registered.transport || registered.transport !== "discord-text") return this.reject(input, "wrong route or transport");
     if (input.authorId !== this.ownerId) return this.reject(input, "foreign author");
     if (envelope.messageId !== input.messageId) return this.reject(input, "message id mismatch");
     if (envelope.transport !== "discord-text" || envelope.decision !== decision) return this.reject(input, "decision or transport mismatch");
@@ -21,7 +21,7 @@ export class Broker {
     try { plaintext = open(this.key, envelope); } catch { this.store.audit({ at: new Date().toISOString(), event: "error", messageId: input.messageId, route: input.route, reason: "authentication failed" }); throw new Error("envelope authentication failed"); }
     const state=this.store.begin(input.messageId); if(state==="resolved"){this.store.audit({at:new Date().toISOString(),event:"replay",messageId:input.messageId,route:input.route});return {status:"replay"};}
     this.store.audit({ at: new Date().toISOString(), event: "accepted", messageId: input.messageId, route: input.route, decision });
-    if (decision === "allow") inject(plaintext, input.messageId);
+    if (decision === "allow") { let ack: Ack; try { ack=await inject(plaintext, input.messageId, input.route); } catch { return { status: "pending" }; } if (ack.messageId !== input.messageId || ack.route !== input.route || ack.accepted !== true) return { status: "pending" }; }
     this.store.markResolved(input.messageId);
     this.store.audit({ at: new Date().toISOString(), event: "resolved", messageId: input.messageId, route: input.route, decision });
     return decision === "allow" ? { status: "resolved", plaintext } : { status: "resolved" };
