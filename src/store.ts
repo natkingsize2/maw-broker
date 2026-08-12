@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, constants } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, constants, fchmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AuditRecord } from "./types";
 import { createHash } from "node:crypto";
@@ -20,7 +20,7 @@ export class DurableStore {
   begin(messageId: string): "new"|"pending"|"resolved" { let result:"new"|"pending"|"resolved"="new"; this.withLock(()=>{ const current=this.readStates(); result=current[messageId]??"new"; if(result==="new"){current[messageId]="pending";this.writeStates(current)} this.states=new Map(Object.entries(current) as any); }); return result; }
 
   audit(record: AuditRecord) {
-    this.withLock(()=>{ const prior=existsSync(this.auditPath)?readFileSync(this.auditPath,"utf8").split("\n").filter(Boolean).at(-1):""; const hash=cryptoHash(prior+JSON.stringify(record)); appendFileSync(this.auditPath, `${JSON.stringify({...record, prevHash:prior?cryptoHash(prior):null, hash})}\n`, {encoding:"utf8",flag:"a",mode:0o600}); const fd=openSync(this.auditPath,"r"); fsyncSync(fd); closeSync(fd); chmodSync(this.auditPath,0o600); });
+    this.withLock(()=>{ const prior=existsSync(this.auditPath)?readFileSync(this.auditPath,"utf8").split("\n").filter(Boolean).at(-1):""; const hash=cryptoHash(prior+JSON.stringify(record)); const line=`${JSON.stringify({...record, prevHash:prior?cryptoHash(prior):null, hash})}\n`; let fd:number|undefined; try { fd=openSync(this.auditPath, constants.O_WRONLY|constants.O_APPEND|constants.O_CREAT|((constants as any).O_NOFOLLOW??0),0o600); fchmodSync(fd,0o600); fsyncSync(fd); writeFileSync(fd,line,"utf8"); fsyncSync(fd); } finally { if(fd!==undefined) closeSync(fd); } });
   }
 
   markResolved(messageId: string) {
@@ -30,6 +30,6 @@ export class DurableStore {
   private readStates(): Record<string,"pending"|"resolved"> { if(!existsSync(this.statePath)) return {}; const x=JSON.parse(readFileSync(this.statePath,"utf8")); if(!x||typeof x!=="object"||Array.isArray(x)||Object.values(x).some((v:any)=>v!=="pending"&&v!=="resolved")) throw new Error("resolved state corrupt"); return x; }
   private writeStates(current: Record<string,"pending"|"resolved">) { const tmp=`${this.statePath}.tmp-${process.pid}`; writeFileSync(tmp,JSON.stringify(current,null,2)+"\n",{encoding:"utf8",mode:0o600}); const fd=openSync(tmp,"r"); fsyncSync(fd); closeSync(fd); renameSync(tmp,this.statePath); const dirfd=openSync(dirname(this.statePath),"r"); fsyncSync(dirfd); closeSync(dirfd); chmodSync(this.statePath,0o600); }
 
-  private withLock(fn:()=>void) { const lock=this.statePath+".lock"; let fd:number|undefined; for(let i=0;i<100;i++){try{fd=openSync(lock,"wx",0o600);writeFileSync(fd,`${process.pid} ${Date.now()}`);break}catch{try{const s=readFileSync(lock,"utf8").split(/\s+/);const stale=Date.now()-Number(s[1])>30000;let dead=false;try{process.kill(Number(s[0]),0)}catch{dead=true}if(stale||dead)unlinkSync(lock)}catch{} Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2)}} if(fd===undefined) throw new Error("store lock timeout"); try{fn()}finally{closeSync(fd);unlinkSync(lock)}}
+  private withLock(fn:()=>void) { const lock=this.statePath+".lock"; let fd:number|undefined; for(let i=0;i<100;i++){try{fd=openSync(lock,"wx",0o600);writeFileSync(fd,`${process.pid} ${Date.now()}`);break}catch{try{const raw=readFileSync(lock,"utf8").trim();const s=raw.split(/\s+/);const valid=s.length===2&&/^\d+$/.test(s[0])&&/^\d+$/.test(s[1]);const stale=!valid||Date.now()-Number(s[1])>30000;let dead=false;if(valid){try{process.kill(Number(s[0]),0)}catch{dead=true}}if(stale||dead)unlinkSync(lock)}catch{} Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2)}} if(fd===undefined) throw new Error("store lock timeout"); try{fn()}finally{closeSync(fd);unlinkSync(lock)}}
 }
 function cryptoHash(s:string){return createHash("sha256").update(s).digest("hex")}

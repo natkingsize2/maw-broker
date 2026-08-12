@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Broker, NAT_USER_ID } from "../src/broker";
@@ -24,3 +24,5 @@ test("symlink store path is rejected", () => { const root=mkdtempSync(join(tmpdi
 test("corrupt resolved state is named", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-corrupt-")); require("node:fs").writeFileSync(join(root,"resolved.json"),'{"bad":true}'); expect(()=>new DurableStore(root)).toThrow("resolved state corrupt"); });
 test("concurrent store instances retain both IDs", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-concurrent-")); const a=new DurableStore(root); const b=new DurableStore(root); a.markResolved("a"); b.markResolved("b"); expect(new DurableStore(root).has("a")).toBe(true); expect(new DurableStore(root).has("b")).toBe(true); });
 test("injection fault leaves pending and restart retries at ack seam", () => { const f=fixture(); const e=seal(key,"thread-1","m-9","x"); expect(()=>f.broker.receive(msg("m-9"),e,"allow",()=>{throw new Error("SIGKILL seam")})).toThrow("SIGKILL seam"); const restarted=new Broker(key,new Map([["thread-1",route]]),new DurableStore(f.root)); let injected=""; expect(restarted.receive(msg("m-9"),e,"allow",p=>{injected=p})).toMatchObject({status:"resolved",plaintext:"x"}); expect(injected).toBe("x"); });
+test("audit refuses a replaced symlink path", () => { const f=fixture(); const victim=join(f.root,"victim.log"); writeFileSync(victim,"SAFE"); writeFileSync(join(f.root,"audit.jsonl"),""); unlinkSync(join(f.root,"audit.jsonl")); symlinkSync(victim,join(f.root,"audit.jsonl")); expect(()=>new DurableStore(f.root).audit({at:new Date().toISOString(),event:"error",reason:"x"})).toThrow(); expect(readFileSync(victim,"utf8")).toBe("SAFE"); });
+test("empty stale lock is reclaimed", () => { const f=fixture(); const lock=join(f.root,"resolved.json.lock"); writeFileSync(lock,""); new DurableStore(f.root).audit({at:new Date().toISOString(),event:"error",reason:"x"}); });
