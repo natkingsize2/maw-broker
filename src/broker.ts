@@ -4,14 +4,17 @@ import type { Ack, BrokerEnvelope, Decision, DownstreamInjector, InboundMessage,
 import { RouteRegistry } from "./routes";
 
 export const NAT_USER_ID = "358970717125214209";
+export function validatedOwnerId(value = process.env.MAW_BROKER_OWNER_ID ?? NAT_USER_ID): string { if (!/^\d{17,20}$/.test(value)) throw new Error("owner id config invalid"); return value; }
 
 export class Broker {
-  constructor(private readonly key: Buffer, routes: ReadonlyMap<string, Route> | RouteRegistry, private readonly store: DurableStore, private readonly ownerId = NAT_USER_ID) {
+  constructor(private readonly key: Buffer, routes: ReadonlyMap<string, Route> | RouteRegistry, private readonly store: DurableStore, ownerId?: string) {
     this.routes = routes instanceof RouteRegistry ? routes : new RouteRegistry([...routes.values()]);
+    this.ownerId = validatedOwnerId(ownerId);
   }
+  private readonly ownerId: string;
   private readonly routes: RouteRegistry;
 
-  async receive(input: InboundMessage, envelope: BrokerEnvelope, decision: Decision, inject: DownstreamInjector = async () => ({ messageId: input.messageId, route: input.route, accepted: true })): Promise<{ status: "resolved" | "replay" | "pending"; plaintext?: string }> {
+  async receive(input: InboundMessage, envelope: BrokerEnvelope, decision: Decision, inject: DownstreamInjector): Promise<{ status: "resolved" | "replay" | "pending"; plaintext?: string }> {
     if (decision !== "allow" && decision !== "deny") return this.reject(input, "invalid decision");
     const registered=this.routes.get(input.route); if (!registered || envelope.route !== input.route || envelope.transport !== registered.transport || registered.transport !== "discord-text") return this.reject(input, "wrong route or transport");
     if (input.authorId !== this.ownerId) return this.reject(input, "foreign author");

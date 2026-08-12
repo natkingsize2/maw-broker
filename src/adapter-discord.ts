@@ -9,3 +9,9 @@ export class DiscordTextAdapter implements TextAdapter {
   }
   encodeDecision(messageId: string, decision: Decision) { return `${messageId} ${decision}`; }
 }
+
+export type WebhookPolicy = { allowedWebhookIds?: ReadonlySet<string> };
+export function admitsDiscordMessage(message: InboundMessage, policy: WebhookPolicy = {}): boolean {
+  if (message.webhookId) return policy.allowedWebhookIds?.has(message.webhookId) === true;
+  return message.authorIsBot !== true;
+}

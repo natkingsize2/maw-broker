@@ -8,6 +8,8 @@ export class DiscordPollSource {
   constructor(private readonly client: DiscordClient, private readonly channelId: string) {}
   async poll(before?: string): Promise<InboundMessage[]> {
     const rows = await this.client.getMessages(this.channelId, before, 50);
-    return rows.map(row => this.adapter.normalize(row));
+    const out: InboundMessage[] = [];
+    for (const row of rows) { try { out.push(this.adapter.normalize(row)); } catch { /* malformed row is isolated; cursor owner audits/advances it */ } }
+    return out;
   }
 }
