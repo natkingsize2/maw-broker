@@ -1,0 +1,16 @@
+{
+  "name": "maw-broker",
+  "version": "0.1.0",
+  "entry": "./index.ts",
+  "sdk": "^1.0.0",
+  "target": "js",
+  "tier": "extra",
+  "weight": 70,
+  "description": "Transport-neutral authenticated decision broker with a Discord text adapter.",
+  "author": "natkingsize",
+  "capabilities": ["broker:receive", "broker:decide", "broker:audit"],
+  "cli": {
+    "command": "maw-broker",
+    "help": "maw broker <status|routes|verify> — local-only broker diagnostics; no transport side effects"
+  }
+}
