@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Broker, NAT_USER_ID } from "../src/broker";
@@ -23,3 +23,4 @@ test("transport and decision tamper is rejected", () => { const f=fixture(); con
 test("symlink store path is rejected", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-link-")); const target=mkdtempSync(join(tmpdir(),"maw-broker-target-")); const link=join(root,"store"); symlinkSync(target,link); expect(()=>new DurableStore(link)).toThrow("symlink"); });
 test("corrupt resolved state is named", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-corrupt-")); require("node:fs").writeFileSync(join(root,"resolved.json"),'{"bad":true}'); expect(()=>new DurableStore(root)).toThrow("resolved state corrupt"); });
 test("concurrent store instances retain both IDs", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-concurrent-")); const a=new DurableStore(root); const b=new DurableStore(root); a.markResolved("a"); b.markResolved("b"); expect(new DurableStore(root).has("a")).toBe(true); expect(new DurableStore(root).has("b")).toBe(true); });
+test("injection fault leaves pending and restart retries at ack seam", () => { const f=fixture(); const e=seal(key,"thread-1","m-9","x"); expect(()=>f.broker.receive(msg("m-9"),e,"allow",()=>{throw new Error("SIGKILL seam")})).toThrow("SIGKILL seam"); const restarted=new Broker(key,new Map([["thread-1",route]]),new DurableStore(f.root)); let injected=""; expect(restarted.receive(msg("m-9"),e,"allow",p=>{injected=p})).toMatchObject({status:"resolved",plaintext:"x"}); expect(injected).toBe("x"); });

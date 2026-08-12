@@ -11,16 +11,17 @@ export class Broker {
   }
   private readonly routes: RouteRegistry;
 
-  receive(input: InboundMessage, envelope: BrokerEnvelope, decision: Decision): { status: "resolved" | "replay"; plaintext?: string } {
+  receive(input: InboundMessage, envelope: BrokerEnvelope, decision: Decision, inject: (plaintext: string, messageId: string) => void = () => {}): { status: "resolved" | "replay" | "pending"; plaintext?: string } {
     if (decision !== "allow" && decision !== "deny") return this.reject(input, "invalid decision");
     if (!this.routes.has(input.route) || envelope.route !== input.route) return this.reject(input, "wrong route");
     if (input.authorId !== this.ownerId) return this.reject(input, "foreign author");
-    if (this.store.has(input.messageId)) { this.store.audit({ at: new Date().toISOString(), event: "replay", messageId: input.messageId, route: input.route }); return { status: "replay" }; }
     if (envelope.messageId !== input.messageId) return this.reject(input, "message id mismatch");
     if (envelope.transport !== "discord-text" || envelope.decision !== decision) return this.reject(input, "decision or transport mismatch");
     let plaintext: string;
     try { plaintext = open(this.key, envelope); } catch { this.store.audit({ at: new Date().toISOString(), event: "error", messageId: input.messageId, route: input.route, reason: "authentication failed" }); throw new Error("envelope authentication failed"); }
+    const state=this.store.begin(input.messageId); if(state==="resolved"){this.store.audit({at:new Date().toISOString(),event:"replay",messageId:input.messageId,route:input.route});return {status:"replay"};}
     this.store.audit({ at: new Date().toISOString(), event: "accepted", messageId: input.messageId, route: input.route, decision });
+    if (decision === "allow") inject(plaintext, input.messageId);
     this.store.markResolved(input.messageId);
     this.store.audit({ at: new Date().toISOString(), event: "resolved", messageId: input.messageId, route: input.route, decision });
     return decision === "allow" ? { status: "resolved", plaintext } : { status: "resolved" };
