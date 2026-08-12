@@ -8,9 +8,11 @@
   "weight": 70,
   "description": "Transport-neutral authenticated decision broker with a Discord text adapter.",
   "author": "natkingsize",
+  "capabilityNamespaces": ["broker"],
   "capabilities": ["broker:receive", "broker:decide", "broker:audit"],
+  "schemaVersion": 1,
   "cli": {
-    "command": "maw-broker",
+    "command": "broker",
     "help": "maw broker <status|routes|verify> — local-only broker diagnostics; no transport side effects"
   }
 }

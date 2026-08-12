@@ -14,6 +14,8 @@ export type BrokerEnvelope = {
   nonce: string;
   ciphertext: string;
   tag: string;
+  transport: string;
+  decision: Decision;
 };
 
 export type AuditRecord = {

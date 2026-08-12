@@ -17,12 +17,13 @@ export class Broker {
     if (input.authorId !== this.ownerId) return this.reject(input, "foreign author");
     if (this.store.has(input.messageId)) { this.store.audit({ at: new Date().toISOString(), event: "replay", messageId: input.messageId, route: input.route }); return { status: "replay" }; }
     if (envelope.messageId !== input.messageId) return this.reject(input, "message id mismatch");
+    if (envelope.transport !== "discord-text" || envelope.decision !== decision) return this.reject(input, "decision or transport mismatch");
     let plaintext: string;
     try { plaintext = open(this.key, envelope); } catch { this.store.audit({ at: new Date().toISOString(), event: "error", messageId: input.messageId, route: input.route, reason: "authentication failed" }); throw new Error("envelope authentication failed"); }
     this.store.audit({ at: new Date().toISOString(), event: "accepted", messageId: input.messageId, route: input.route, decision });
     this.store.markResolved(input.messageId);
     this.store.audit({ at: new Date().toISOString(), event: "resolved", messageId: input.messageId, route: input.route, decision });
-    return { status: "resolved", plaintext };
+    return decision === "allow" ? { status: "resolved", plaintext } : { status: "resolved" };
   }
 
   private reject(input: InboundMessage, reason: string): never {
