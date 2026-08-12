@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, constants, fchmodSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, constants, fchmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AuditRecord } from "./types";
 import { createHash } from "node:crypto";
@@ -20,7 +20,7 @@ export class DurableStore {
   begin(messageId: string): "new"|"pending"|"resolved" { let result:"new"|"pending"|"resolved"="new"; this.withLock(()=>{ const current=this.readStates(); result=current[messageId]??"new"; if(result==="new"){current[messageId]="pending";this.writeStates(current)} this.states=new Map(Object.entries(current) as any); }); return result; }
 
   audit(record: AuditRecord) {
-    this.withLock(()=>{ const prior=existsSync(this.auditPath)?readFileSync(this.auditPath,"utf8").split("\n").filter(Boolean).at(-1):""; const hash=cryptoHash(prior+JSON.stringify(record)); const line=`${JSON.stringify({...record, prevHash:prior?cryptoHash(prior):null, hash})}\n`; let fd:number|undefined; try { fd=openSync(this.auditPath, constants.O_WRONLY|constants.O_APPEND|constants.O_CREAT|((constants as any).O_NOFOLLOW??0),0o600); fchmodSync(fd,0o600); fsyncSync(fd); writeFileSync(fd,line,"utf8"); fsyncSync(fd); } finally { if(fd!==undefined) closeSync(fd); } });
+    this.withLock(()=>{ let fd:number|undefined; try { try { fd=openSync(this.auditPath, constants.O_WRONLY|constants.O_APPEND|constants.O_CREAT|constants.O_NONBLOCK|((constants as any).O_NOFOLLOW??0),0o600); } catch { throw new Error("unsafe audit file"); } const st=fstatSync(fd); if(!st.isFile()||st.nlink!==1) throw new Error("unsafe audit file"); const prior=readFileSync(this.auditPath,"utf8").split("\n").filter(Boolean).at(-1)??""; const hash=cryptoHash(prior+JSON.stringify(record)); const line=`${JSON.stringify({...record, prevHash:prior?cryptoHash(prior):null, hash})}\n`; fchmodSync(fd,0o600); writeFileSync(fd,line,"utf8"); fsyncSync(fd); } finally { if(fd!==undefined) closeSync(fd); } });
   }
 
   markResolved(messageId: string) {

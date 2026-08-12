@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, unlinkSync, linkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Broker, NAT_USER_ID } from "../src/broker";
@@ -9,7 +10,7 @@ import type { InboundMessage, Route } from "../src/types";
 
 const key = Buffer.alloc(32, 7); const route: Route = { name: "gate", transport: "discord-text", destination: "thread-1" };
 const msg = (id = "m-1", authorId = NAT_USER_ID, routeName = "thread-1"): InboundMessage => ({ messageId: id, authorId, content: "approve", route: routeName });
-function fixture(root = mkdtempSync(join(tmpdir(), "maw-broker-"))) { const routes = new Map([["thread-1", route]]); return { root, broker: new Broker(key, routes, new DurableStore(root)) }; }
+function fixture(root = mkdtempSync(join(tmpdir(), "maw-broker-"))) { const routes = new Map([["thread-1", route]]); const store=new DurableStore(root); return { root, store, broker: new Broker(key, routes, store) }; }
 
 test("owner allow resolves and survives restart dedupe", () => { const f=fixture(); const e=seal(key,"thread-1","m-1","payload"); expect(f.broker.receive(msg(),e,"allow")).toMatchObject({status:"resolved",plaintext:"payload"}); const restarted=new Broker(key,new Map([["thread-1",route]]),new DurableStore(f.root)); expect(restarted.receive(msg(),e,"allow").status).toBe("replay"); });
 test("foreign author is rejected", () => { const f=fixture(); expect(()=>f.broker.receive(msg("m-2","foreign"),seal(key,"thread-1","m-2","x"),"allow")).toThrow("foreign author"); });
@@ -24,5 +25,6 @@ test("symlink store path is rejected", () => { const root=mkdtempSync(join(tmpdi
 test("corrupt resolved state is named", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-corrupt-")); require("node:fs").writeFileSync(join(root,"resolved.json"),'{"bad":true}'); expect(()=>new DurableStore(root)).toThrow("resolved state corrupt"); });
 test("concurrent store instances retain both IDs", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-concurrent-")); const a=new DurableStore(root); const b=new DurableStore(root); a.markResolved("a"); b.markResolved("b"); expect(new DurableStore(root).has("a")).toBe(true); expect(new DurableStore(root).has("b")).toBe(true); });
 test("injection fault leaves pending and restart retries at ack seam", () => { const f=fixture(); const e=seal(key,"thread-1","m-9","x"); expect(()=>f.broker.receive(msg("m-9"),e,"allow",()=>{throw new Error("SIGKILL seam")})).toThrow("SIGKILL seam"); const restarted=new Broker(key,new Map([["thread-1",route]]),new DurableStore(f.root)); let injected=""; expect(restarted.receive(msg("m-9"),e,"allow",p=>{injected=p})).toMatchObject({status:"resolved",plaintext:"x"}); expect(injected).toBe("x"); });
-test("audit refuses a replaced symlink path", () => { const f=fixture(); const victim=join(f.root,"victim.log"); writeFileSync(victim,"SAFE"); writeFileSync(join(f.root,"audit.jsonl"),""); unlinkSync(join(f.root,"audit.jsonl")); symlinkSync(victim,join(f.root,"audit.jsonl")); expect(()=>new DurableStore(f.root).audit({at:new Date().toISOString(),event:"error",reason:"x"})).toThrow(); expect(readFileSync(victim,"utf8")).toBe("SAFE"); });
-test("empty stale lock is reclaimed", () => { const f=fixture(); const lock=join(f.root,"resolved.json.lock"); writeFileSync(lock,""); new DurableStore(f.root).audit({at:new Date().toISOString(),event:"error",reason:"x"}); });
+test("post-construction hard link is refused without victim write", () => { const f=fixture(); const victim=join(f.root,"victim.log"); writeFileSync(victim,"SAFE"); writeFileSync(join(f.root,"audit.jsonl"),""); unlinkSync(join(f.root,"audit.jsonl")); linkSync(victim,join(f.root,"audit.jsonl")); expect(()=>f.store.audit({at:new Date().toISOString(),event:"error",reason:"x"})).toThrow("unsafe audit file"); expect(readFileSync(victim,"utf8")).toBe("SAFE"); });
+test("post-construction FIFO is refused and lock is releasable", () => { const f=fixture(); writeFileSync(join(f.root,"audit.jsonl"),""); unlinkSync(join(f.root,"audit.jsonl")); const fifo=join(f.root,"audit.jsonl"); execFileSync("mkfifo",[fifo]); expect(()=>f.store.audit({at:new Date().toISOString(),event:"error",reason:"x"})).toThrow("unsafe audit file"); unlinkSync(fifo); f.store.audit({at:new Date().toISOString(),event:"error",reason:"lock-released"}); });
+test("empty stale lock is reclaimed", () => { const f=fixture(); const lock=join(f.root,"resolved.json.lock"); writeFileSync(lock,""); f.store.audit({at:new Date().toISOString(),event:"error",reason:"x"}); });
