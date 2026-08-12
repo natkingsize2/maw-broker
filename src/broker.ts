@@ -4,19 +4,19 @@ import type { Ack, BrokerEnvelope, Decision, DownstreamInjector, InboundMessage,
 import { RouteRegistry } from "./routes";
 
 export const NAT_USER_ID = "358970717125214209";
-export function validatedOwnerId(value = process.env.MAW_BROKER_OWNER_ID ?? NAT_USER_ID): string { if (!/^\d{17,20}$/.test(value)) throw new Error("owner id config invalid"); return value; }
+export function validatedOwnerId(value = process.env.MAW_BROKER_OWNER_ID): string { if (!value || !/^\d{17,20}$/.test(value)) throw new Error("owner id config invalid"); return value; }
 
 export class Broker {
   constructor(private readonly key: Buffer, routes: ReadonlyMap<string, Route> | RouteRegistry, private readonly store: DurableStore, ownerId?: string) {
     this.routes = routes instanceof RouteRegistry ? routes : new RouteRegistry([...routes.values()]);
-    this.ownerId = validatedOwnerId(ownerId);
+    this.ownerId = validatedOwnerId(ownerId ?? process.env.MAW_BROKER_OWNER_ID);
   }
   private readonly ownerId: string;
   private readonly routes: RouteRegistry;
 
   async receive(input: InboundMessage, envelope: BrokerEnvelope, decision: Decision, inject: DownstreamInjector): Promise<{ status: "resolved" | "replay" | "pending"; plaintext?: string }> {
     if (decision !== "allow" && decision !== "deny") return this.reject(input, "invalid decision");
-    const registered=this.routes.get(input.route); if (!registered || envelope.route !== input.route || envelope.transport !== registered.transport || registered.transport !== "discord-text") return this.reject(input, "wrong route or transport");
+    const registered=this.routes.get(input.route); if (!registered || envelope.route !== input.route) return this.reject(input, "wrong route"); if (envelope.transport !== registered.transport || registered.transport !== "discord-text") return this.reject(input, "transport mismatch");
     if (input.authorId !== this.ownerId) return this.reject(input, "foreign author");
     if (envelope.messageId !== input.messageId) return this.reject(input, "message id mismatch");
     if (envelope.transport !== "discord-text" || envelope.decision !== decision) return this.reject(input, "decision or transport mismatch");
