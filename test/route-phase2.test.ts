@@ -231,3 +231,12 @@ test("routes file rejects wrong mode, two routes, fuzzy destination, missing age
   const agentless = join(root, "agentless.json"); writeFileSync(agentless, JSON.stringify([{ ...good, agent: "" }]), { mode: 0o600 });
   expect(() => loadRoutesFile(agentless)).toThrow("agent invalid");
 });
+
+// ── Production hard-pin (anvil decision on 5a): shape-valid wrong snowflake must fail startup
+import { assertProductionChannel, PRODUCTION_CHANNEL_ID } from "../src/route-launcher";
+test("production pin: the original room passes, a wrong-but-valid snowflake fails startup", () => {
+  const good: Route = { name: "general", transport: "discord-text", destination: PRODUCTION_CHANNEL_ID, agent: "03-canon:1" };
+  expect(() => assertProductionChannel([good])).not.toThrow();
+  expect(() => assertProductionChannel([{ ...good, destination: "9999999999999999999" }])).toThrow("differs from production pin");
+  expect(() => assertProductionChannel([])).toThrow("differs from production pin");
+});

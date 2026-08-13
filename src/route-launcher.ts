@@ -30,6 +30,15 @@ export function loadRoutesFile(path: string): Route[] {
   return routes;
 }
 
+/** Production contract (anvil decision 2026-08-13 on probe finding 5a): the production
+ *  artifact is HARD-PINNED to the original room. The library (`loadRoutesFile`) stays
+ *  generic, but this launcher refuses startup when the routes file points anywhere else —
+ *  a mis-pointed but shape-valid routes file must fail loudly, not run quietly. */
+export const PRODUCTION_CHANNEL_ID = "1056224550129508415";
+export function assertProductionChannel(routes: Route[]): void {
+  if (routes.length !== 1 || routes[0]!.destination !== PRODUCTION_CHANNEL_ID) throw new Error("routes file channel differs from production pin");
+}
+
 export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
   const secrets = loadRunnerSecrets(env);
   const routesFile = env.MAW_BROKER_ROUTES_FILE;
@@ -40,6 +49,7 @@ export async function main(env: Record<string, string | undefined> = process.env
   if (!Number.isInteger(intervalMs) || intervalMs < 1000 || !Number.isInteger(maxPolls) || maxPolls < 1) throw new Error("broker route configuration invalid");
 
   const routes = loadRoutesFile(routesFile);
+  assertProductionChannel(routes);
   const registry = new RouteRegistry(routes);
   const channel = routes[0]!.destination;
   const store = new DurableStore(join(storeRoot, "store"));
