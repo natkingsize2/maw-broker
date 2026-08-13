@@ -129,3 +129,51 @@ test("restart with an identical state emits nothing at all (no post, no edit)", 
   await new StateMirror(sink, store).reconcile([s("a", "active", "1")]);
   expect(calls.length).toBe(after);   // second process added nothing
 });
+
+// ── FileMirrorStateStore: 0600/dir-0700, symlink+shape fail-closed, atomic round-trip
+import { FileMirrorStateStore } from "../src/state-mirror";
+import { mkdtempSync, writeFileSync as wf, symlinkSync, statSync, chmodSync as chm } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+test("FileMirrorStateStore round-trips and writes 0600 file under a 0700 dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-"));
+  const store = new FileMirrorStateStore(join(root, "state", "mirror.json"));
+  expect(store.load()).toBeUndefined();
+  store.save({ messageId: "msg-9", snapshot: { canon: "canon active x" } });
+  expect(store.load()).toEqual({ messageId: "msg-9", snapshot: { canon: "canon active x" } });
+  expect(statSync(join(root, "state", "mirror.json")).mode & 0o777).toBe(0o600);
+  expect(statSync(join(root, "state")).mode & 0o777).toBe(0o700);
+});
+test("FileMirrorStateStore rejects a wrong-mode file (tamper), fails closed", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-mode-"));
+  const store = new FileMirrorStateStore(join(root, "mirror.json"));
+  store.save({ messageId: "m", snapshot: {} });
+  chm(join(root, "mirror.json"), 0o644);
+  expect(() => store.load()).toThrow("mirror state corrupt");
+});
+test("FileMirrorStateStore rejects a symlinked state file", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-sym-"));
+  const target = join(root, "real.json"); wf(target, JSON.stringify({ messageId: "m", snapshot: {} }), { mode: 0o600 });
+  const link = join(root, "mirror.json"); symlinkSync(target, link);
+  expect(() => new FileMirrorStateStore(link)).toThrow("mirror state corrupt");
+});
+test("FileMirrorStateStore rejects tampered shape (non-string fingerprint, missing id)", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-shape-"));
+  const p = join(root, "mirror.json");
+  const store = new FileMirrorStateStore(p);
+  wf(p, JSON.stringify({ messageId: "m", snapshot: { canon: 42 } }), { mode: 0o600 });
+  expect(() => store.load()).toThrow("mirror state corrupt");
+  wf(p, JSON.stringify({ snapshot: {} }), { mode: 0o600 });
+  expect(() => store.load()).toThrow("mirror state corrupt");
+});
+test("StateMirror across restart via FILE store edits, never re-posts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-restart-"));
+  const path = join(root, "mirror.json");
+  const { calls, sink } = recordingSink();
+  const m1 = new StateMirror(sink, new FileMirrorStateStore(path));
+  expect(await m1.reconcile([s("canon", "active", "a")])).toBe("posted");
+  const m2 = new StateMirror(sink, new FileMirrorStateStore(path));   // restart: reload from disk
+  expect(await m2.reconcile([s("canon", "done", "a")])).toBe("edited");
+  expect(calls.filter(c => c.startsWith("post:")).length).toBe(1);
+});
