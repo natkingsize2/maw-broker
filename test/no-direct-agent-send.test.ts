@@ -3,45 +3,46 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Owner scope (2026-08-14): "No agent-held Discord token... no-direct-agent-send invariant."
- * There is no runtime unit to call for this — it is a STRUCTURAL property of the codebase: no
- * module an agent process could import may construct a live, credentialed path to Discord.
- * This test enumerates every `src/*.ts` file and asserts that Discord-credential construction
- * (`new DiscordRestClient(`) and outbound send primitives (`.postMessage(` / `.editMessage(`
- * defined as class members, not calls) exist ONLY inside the known daemon entrypoint files —
- * the ones with `if (import.meta.main)` blocks, i.e. things meant to run as their OWN process,
- * never imported into an agent's process. Adding a new file that constructs a Discord client
- * without adding it to ALLOWED_CREDENTIAL_SITES turns this test red — that is the point: the
- * allowlist is the fail-closed gate, not a comment.
+ * CONTRACT (owner directive 2026-08-14, both messages): "No agent-held Discord token... one
+ * bridge daemon is the only Discord token owner... add tests that reject multiple token-owning
+ * entrypoints." This is a structural property of the codebase, so the test IS the grep-equivalent
+ * enumeration below — not a runtime unit. Before this session's refactor, THREE files
+ * (`route-launcher.ts`, `mirror-launcher.ts`, `project-poller.ts`) each independently called
+ * `loadRunnerSecrets`/held `DISCORD_BOT_TOKEN`; `summary-back.ts` made it four. After the
+ * refactor (`bridge-server.ts` + `bridge-client.ts`), exactly ONE file may construct a live,
+ * credentialed `DiscordRestClient`: `bridge-server.ts`. Every other entrypoint talks to it over
+ * local HTTP via `BridgeHttpClient`, which never sees `DISCORD_BOT_TOKEN`.
+ *
+ * Adding a second credential-construction site anywhere in `src/` turns this test red — that is
+ * the enforcement, not a comment someone can skim past.
  */
 const WT = join(import.meta.dir, "..");
 const SRC = join(WT, "src");
 
-// Files allowed to construct a live DiscordRestClient (i.e. hold/use the bot token). Every one
-// of these is a standalone daemon entrypoint (`if (import.meta.main)`), never a library an agent
-// process imports for its own use.
-const ALLOWED_CREDENTIAL_SITES = new Set([
-  "route-launcher.ts",   // phase-2 command broker daemon
-  "mirror-launcher.ts",  // state-mirror daemon
-  "project-poller.ts",   // phase-4 inbound poller daemon
-  "summary-back.ts",     // CLI invoked BY an agent's shell (gh-style), not imported into agent code
-]);
+/** Exactly one entry, by contract. A PR that adds a second is exactly what this test exists to
+ *  catch — do not add to this set without also justifying why "one bridge daemon" is no longer
+ *  the architecture. */
+const ALLOWED_CREDENTIAL_SITES = new Set(["bridge-server.ts"]);
+
+/** Files that talk to Discord functionality but must do so ONLY via BridgeHttpClient — asserted
+ *  by absence of DiscordRestClient AND absence of any DISCORD_BOT_TOKEN reference. */
+const MUST_BE_TOKEN_FREE = ["route-launcher.ts", "mirror-launcher.ts", "project-poller.ts", "summary-back.ts", "runner.ts", "project-routes.ts", "routes.ts", "state-mirror.ts", "bridge-client.ts"];
 
 function listSrcFiles(): string[] {
   return readdirSync(SRC).filter(f => f.endsWith(".ts"));
 }
 
-describe("no-direct-agent-send invariant — structural (grep-equivalent over src/)", () => {
-  test("every file constructing a live DiscordRestClient is on the allowlist of daemon entrypoints", () => {
-    const offenders: string[] = [];
+describe("single Discord-credential-owner contract", () => {
+  test("exactly one file in src/ constructs a live DiscordRestClient — the allowlist, not more", () => {
+    const owners: string[] = [];
     for (const file of listSrcFiles()) {
       const body = readFileSync(join(SRC, file), "utf8");
-      if (/new\s+DiscordRestClient\s*\(/.test(body) && !ALLOWED_CREDENTIAL_SITES.has(file)) offenders.push(file);
+      if (/new\s+DiscordRestClient\s*\(/.test(body)) owners.push(file);
     }
-    expect(offenders).toEqual([]);
+    expect(owners).toEqual([...ALLOWED_CREDENTIAL_SITES]);
   });
 
-  test("every allowlisted entrypoint is actually a standalone daemon (`if (import.meta.main)`), not an importable library used elsewhere", () => {
+  test("every allowlisted credential owner is a standalone daemon (`if (import.meta.main)`), never an importable library", () => {
     const notStandalone: string[] = [];
     for (const file of ALLOWED_CREDENTIAL_SITES) {
       const body = readFileSync(join(SRC, file), "utf8");
@@ -50,18 +51,33 @@ describe("no-direct-agent-send invariant — structural (grep-equivalent over sr
     expect(notStandalone).toEqual([]);
   });
 
-  test("route bindings themselves (project-routes.ts, routes.ts) never import runner.ts (no credential reachable from route config)", () => {
+  test("REJECTED: no file outside the allowlist may reference DISCORD_BOT_TOKEN at all, not just avoid constructing a client with it", () => {
+    const offenders: string[] = [];
+    for (const file of MUST_BE_TOKEN_FREE) {
+      const body = readFileSync(join(SRC, file), "utf8");
+      if (body.includes("DISCORD_BOT_TOKEN")) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("route-launcher.ts, mirror-launcher.ts, and summary-back.ts each import bridge-client, never runner's DiscordRestClient, for outbound Discord calls", () => {
+    for (const file of ["route-launcher.ts", "mirror-launcher.ts", "summary-back.ts"]) {
+      const body = readFileSync(join(SRC, file), "utf8");
+      expect(body.includes('from "./bridge-client"')).toBe(true);
+      expect(/import\s*\{[^}]*DiscordRestClient/.test(body)).toBe(false);
+    }
+  });
+
+  test("route bindings and state-mirror never import runner.ts at all (no credential reachable from route config or mirror logic)", () => {
     for (const file of ["project-routes.ts", "routes.ts", "state-mirror.ts"]) {
       const body = readFileSync(join(SRC, file), "utf8");
       expect(body.includes('from "./runner"')).toBe(false);
     }
   });
 
-  test("adding a NEW credential construction site outside the allowlist is caught (meta-test: prove the gate itself is fail-closed)", () => {
-    // Simulate a rogue file the way the real grep-equivalent would see it — this test doesn't
-    // write to disk, it proves the detection regex/allowlist logic used above actually fires.
+  test("meta-test: a second (rogue) credential site would actually be caught by this gate's own logic", () => {
     const rogueBody = 'import { DiscordRestClient } from "./runner";\nconst c = new DiscordRestClient(token);\n';
-    const wouldBeCaught = /new\s+DiscordRestClient\s*\(/.test(rogueBody) && !ALLOWED_CREDENTIAL_SITES.has("agent-side-helper.ts");
+    const wouldBeCaught = /new\s+DiscordRestClient\s*\(/.test(rogueBody) && !ALLOWED_CREDENTIAL_SITES.has("route-launcher.ts");
     expect(wouldBeCaught).toBe(true);
   });
 });
@@ -69,9 +85,8 @@ describe("no-direct-agent-send invariant — structural (grep-equivalent over sr
 /**
  * NOT a test in this suite, deliberately: whether the CURRENT agent process (Canon Prime) holds
  * a Discord-capable channel is a fact about the OS process tree of the machine running the
- * agent, not about this repo's source — a `bun test` assertion here would either be vacuous
- * (always pass) or would need to shell out and inspect an unrelated process, which is not this
- * repo's job. That receiver-side check was run live and is recorded with full command + output
- * in the dossier (§ no-direct-agent-send invariant, machine evidence), not duplicated here as a
- * fake always-green test.
+ * agent, not about this repo's source. That receiver-side check was run live and is recorded
+ * with full command + output in the dossier
+ * (`ψ/memory/logs/2026-08-14_0100_central-broker-discord-bridge-test-dossier.md`), not
+ * duplicated here as a fake always-green test.
  */

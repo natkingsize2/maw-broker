@@ -98,15 +98,32 @@ export class DiscordRestClient implements DiscordClient {
   }
 }
 
-export type RunnerSecrets = { discordBotToken: string; brokerKey: Buffer; ownerId: string };
 type Environment = Record<string, string | undefined>;
+
+/** Shared 0600/no-symlink secrets-file guard: read `envKey`'s path if set (else use `env`
+ *  itself as the values source). Exported so `bridge-server.ts`'s OWN secrets loader — which
+ *  holds a materially different secret (the Discord token) — reuses the identical filesystem
+ *  guard instead of a second, possibly-drifted copy of it. */
+export function readSecretsSource(env: Environment, envKey: string): Environment {
+  const path = env[envKey];
+  if (!path) return env;
+  if (lstatSync(path).isSymbolicLink() || (statSync(path).mode & 0o777) !== 0o600) throw new Error("secrets file invalid");
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+/**
+ * `RunnerSecrets` deliberately has NO Discord token (owner contract 2026-08-14: "Broker owns
+ * route audit dedupe mirror and has no Discord credential"). `brokerKey` authenticates the
+ * owner-approve/reject envelope (`crypto.ts` seal/open) — an unrelated secret from the Discord
+ * bot token, and one the broker legitimately needs regardless of who talks to Discord.
+ */
+export type RunnerSecrets = { brokerKey: Buffer; ownerId: string };
 export function loadRunnerSecrets(env: Environment = process.env): RunnerSecrets {
-  let values = env;
   try {
-    if (env.MAW_BROKER_SECRETS_FILE) { const path = env.MAW_BROKER_SECRETS_FILE; if (lstatSync(path).isSymbolicLink() || (statSync(path).mode & 0o777) !== 0o600) throw new Error(); values = JSON.parse(readFileSync(path, "utf8")); }
-    const token = values.DISCORD_BOT_TOKEN, ownerId = values.MAW_BROKER_OWNER_ID, encodedKey = values.MAW_BROKER_KEY_B64;
-    if (typeof token !== "string" || typeof ownerId !== "string" || typeof encodedKey !== "string" || !token || !/^\d{17,20}$/.test(ownerId)) throw new Error();
-    return { discordBotToken: token, brokerKey: keyFromBase64(encodedKey), ownerId };
+    const values = readSecretsSource(env, "MAW_BROKER_SECRETS_FILE");
+    const ownerId = values.MAW_BROKER_OWNER_ID, encodedKey = values.MAW_BROKER_KEY_B64;
+    if (typeof ownerId !== "string" || typeof encodedKey !== "string" || !/^\d{17,20}$/.test(ownerId)) throw new Error();
+    return { brokerKey: keyFromBase64(encodedKey), ownerId };
   } catch { throw new Error("broker runner configuration invalid"); }
 }
 

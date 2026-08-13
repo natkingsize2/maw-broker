@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import { PersistentLease, DiscordRestClient, loadRunnerSecrets } from "./runner";
+import { PersistentLease } from "./runner";
+import { BridgeHttpClient, loadBridgeClientConfig } from "./bridge-client";
 import { StateMirror, DiscordDigestSink, FileMirrorStateStore, type AgentState } from "./state-mirror";
 
 /** The one place agent states come from. Kept behind an interface so the reconcile loop is
@@ -73,9 +74,11 @@ export function assertMirrorConfig(env: Record<string, string | undefined>): { c
 }
 
 export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
-  const secrets = loadRunnerSecrets(env);
+  // No Discord credential here (owner contract 2026-08-14): the mirror talks to the ONE bridge
+  // daemon over local HTTP instead of holding the Discord bot token itself.
+  const { bridgeUrl, localAuthToken } = loadBridgeClientConfig(env);
   const { channel, storeRoot, intervalMs, maxPolls } = assertMirrorConfig(env);
-  const client = new DiscordRestClient(secrets.discordBotToken);
+  const client = new BridgeHttpClient(bridgeUrl, localAuthToken);
   const source = await resolveStateSource(env);
   const service = new MirrorService({
     sink: new DiscordDigestSink(client, channel),

@@ -11,13 +11,25 @@ import { buildSummaryContent, postSummary } from "../src/summary-back";
  * fabricated fixtures. Snowflake IDs and issue refs are not secrets; the bot token is not used
  * anywhere in this file (fake transport only, per the owner's "prepare, do not deploy" scope).
  *
- * Finding surfaced by this file (see dossier §Findings): two of the four routes carry an `mqtt`
- * field. The 2026-08-14 owner directive says "No MQTT" for this launch — those fields must be
- * stripped from the real config before any launch gate opens. This test intentionally keeps them
- * in the fixture so the loader's schema behavior is verified against the ACTUAL file shape on
- * disk today, not a sanitized stand-in.
+ * Update 2026-08-14 01:16: per owner contract, `mqtt` is no longer a field `ProjectRoute` can
+ * carry at all (see `src/project-routes.ts` — the loader now REJECTS any row with an `mqtt` key,
+ * rather than accepting it). The fixture below is the CORRECTED shape — what the live config
+ * must look like to load at all now. The separate CONTRACT test further down proves the loader
+ * rejects the file's CURRENT on-disk shape (which still has `mqtt` on 2 of 4 rows as of last
+ * read) — i.e. the real production config will not load until it is fixed, and that failure is
+ * loud, not silent.
  */
 const FOUR_PRODUCTION_ROUTES: ProjectRoute[] = [
+  { name: "oracle-continuity", transport: "discord-text", destination: "1537404236403581029", agent: "mba:02-anvil", issue: "natkingsize2/anvil-oracle#1" },
+  { name: "livesiang", transport: "discord-text", destination: "1537404238861438996", agent: "03-canon:1", issue: "natkingsize2/liveSiang#15" },
+  { name: "broker-project-router", transport: "discord-text", destination: "1537404241763639336", agent: "03-canon:1", issue: "natkingsize2/maw-broker#1" },
+  { name: "maw-pipecat", transport: "discord-text", destination: "1537405946379243600", agent: "mba:02-anvil", issue: "natkingsize2/liveSiang#95" },
+];
+
+/** The file exactly as it sits on disk today (`~/.config/maw-broker/project-routes.json`,
+ *  last read 2026-08-13 19:26) — still carrying `mqtt` on 2 rows. Used ONLY to prove the loader
+ *  now refuses it; never used for any successful-load assertion. */
+const LIVE_CONFIG_SHAPE_AS_OF_TODAY: unknown[] = [
   { name: "oracle-continuity", transport: "discord-text", destination: "1537404236403581029", agent: "mba:02-anvil", issue: "natkingsize2/anvil-oracle#1" },
   { name: "livesiang", transport: "discord-text", destination: "1537404238861438996", agent: "03-canon:1", issue: "natkingsize2/liveSiang#15", mqtt: "canon" },
   { name: "broker-project-router", transport: "discord-text", destination: "1537404241763639336", agent: "03-canon:1", issue: "natkingsize2/maw-broker#1", mqtt: "canon" },
@@ -54,11 +66,11 @@ describe("four production route bindings — static load", () => {
     expect(registry.project("livesiang")?.agent).toBe("03-canon:1");
   });
 
-  test("FINDING: 2 of 4 routes carry mqtt — contradicts 2026-08-14 owner 'No MQTT' scope; must be stripped before launch", () => {
-    const registry = new ProjectRegistry(FOUR_PRODUCTION_ROUTES);
-    const withMqtt = FOUR_PRODUCTION_ROUTES.filter(r => r.mqtt).map(r => r.name);
-    expect(withMqtt).toEqual(["livesiang", "broker-project-router"]);
-    expect(registry.project("livesiang")?.mqtt).toBe("canon");
+  test("CONTRACT: the file's CURRENT on-disk shape (mqtt still on 2 of 4 rows) is refused, loudly, not silently loaded", () => {
+    expect(() => loadProjectRoutesFile(routesFile(LIVE_CONFIG_SHAPE_AS_OF_TODAY))).toThrow("mqtt field rejected");
+    // Confirms WHICH rows are the problem, so whoever fixes the live file knows exactly what to touch.
+    const offenders = LIVE_CONFIG_SHAPE_AS_OF_TODAY.filter((r: any) => r.mqtt !== undefined).map((r: any) => r.name);
+    expect(offenders).toEqual(["livesiang", "broker-project-router"]);
   });
 });
 

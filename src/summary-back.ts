@@ -15,7 +15,7 @@
  * so this path can never ping a room or smuggle a secret.
  */
 
-import { DiscordRestClient, loadRunnerSecrets } from "./runner";
+import { BridgeHttpClient, loadBridgeClientConfig } from "./bridge-client";
 import { sanitizeBlock } from "./state-mirror";
 import { loadProjectRoutesFile, ProjectRegistry, type ProjectRoute } from "./project-routes";
 
@@ -46,9 +46,12 @@ async function main(env: Record<string, string | undefined> = process.env): Prom
   const routesFile = env.MAW_PROJECT_ROUTES_FILE;
   if (!routesFile) throw new Error("MAW_PROJECT_ROUTES_FILE missing");
   const registry = new ProjectRegistry(loadProjectRoutesFile(routesFile));
-  const secrets = loadRunnerSecrets(env);
+  // The agent shell invoking this CLI never sees the Discord bot token (owner contract 2026-08-14:
+  // "no agent-held Discord token") — only the local bridge auth token, which reaches nothing
+  // but the loopback bridge daemon.
+  const { bridgeUrl, localAuthToken } = loadBridgeClientConfig(env);
   const text = await new Response(Bun.stdin.stream()).text();
-  const result = await postSummary(new DiscordRestClient(secrets.discordBotToken), registry, project, text);
+  const result = await postSummary(new BridgeHttpClient(bridgeUrl, localAuthToken), registry, project, text);
   // Counts/ids only — never message content (constraint G).
   console.log(`summary-back project=${project} destination=${result.destination} issue=${result.issue} messageId=${result.messageId}`);
 }

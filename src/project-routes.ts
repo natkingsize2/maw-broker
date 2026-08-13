@@ -15,14 +15,17 @@
 import { lstatSync, readFileSync } from "node:fs";
 import type { Route } from "./types";
 
-export type ProjectRoute = Required<Pick<Route, "name" | "transport" | "destination" | "agent" | "issue">> & {
-  /** MQTT topic prefix of the agent's arra-mqtt channel (its oracle name), when the agent is
-   *  woken over the bus (owner redirect 2026-08-13 19:0x: reuse arra-mqtt, not send-keys).
-   *  EXPLICIT, never derived from `agent` — deriving a name from "mba:02-anvil" is exactly the
-   *  substring game the house has been bitten by three times. Absent ⇒ this route is not
-   *  MQTT-forwarded (and the poller must SAY so, not skip silently). */
-  mqtt?: string;
-};
+/**
+ * MQTT is OUT OF SCOPE (owner directive 2026-08-14 01:16 +07: "MQTT routes and poller are out
+ * of scope and must be rejected by config"). The `mqtt` field previously carried an optional
+ * topic prefix for the now-retired MQTT wake leg (`project-poller.ts`, itself refused at
+ * startup — see that file). Routes must not carry it at all: `loadProjectRoutesFile` rejects
+ * any row with an `mqtt` key present, so a stale/copy-pasted production config with that field
+ * still on it (as `~/.config/maw-broker/project-routes.json` was, at time of writing — see
+ * dossier `ψ/memory/logs/2026-08-14_0100_...md` Finding §1) fails closed at load, loudly,
+ * instead of silently loading with an inert field.
+ */
+export type ProjectRoute = Required<Pick<Route, "name" | "transport" | "destination" | "agent" | "issue">>;
 
 const SNOWFLAKE = /^\d{17,20}$/;
 /** owner/repo#N — bounded so an issue reference can never smuggle text into a room. */
@@ -44,10 +47,13 @@ export function loadProjectRoutesFile(path: string): ProjectRoute[] {
     if (typeof c.destination !== "string" || !SNOWFLAKE.test(c.destination)) throw new Error("project route destination invalid");
     if (typeof c.agent !== "string" || !c.agent) throw new Error("project route agent invalid");
     if (typeof c.issue !== "string" || !ISSUE_RE.test(c.issue)) throw new Error("project route issue invalid");
-    if (c.mqtt !== undefined && (typeof c.mqtt !== "string" || !PROJECT_NAME_RE.test(c.mqtt))) throw new Error("project route mqtt prefix invalid");
+    // MQTT is out of scope (owner 2026-08-14): a route carrying this field at all is refused,
+    // not stripped — a silent strip would let a stale MQTT-shaped config "work" and hide the
+    // scope violation from whoever wrote it.
+    if ((c as { mqtt?: unknown }).mqtt !== undefined) throw new Error("project route mqtt field rejected — MQTT is out of scope");
     if (seenProject.has(c.name) || seenDestination.has(c.destination)) throw new Error("project route duplicate");
     seenProject.add(c.name); seenDestination.add(c.destination);
-    return { name: c.name, transport: c.transport, destination: c.destination, agent: c.agent, issue: c.issue, ...(c.mqtt !== undefined ? { mqtt: c.mqtt } : {}) };
+    return { name: c.name, transport: c.transport, destination: c.destination, agent: c.agent, issue: c.issue };
   });
 }
 

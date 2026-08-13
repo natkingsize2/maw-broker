@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { Broker } from "./broker";
 import { DiscordPollSource } from "./discord-source";
 import { BrokerIngress } from "./ingress";
-import { BrokerRunner, DiscordRestClient, DurableCursor, loadRunnerSecrets } from "./runner";
+import { BrokerRunner, DurableCursor, loadRunnerSecrets } from "./runner";
+import { BridgeHttpClient, loadBridgeClientConfig } from "./bridge-client";
 import { createMawInjector } from "./injector-maw";
 import { DurableStore } from "./store";
 import { RouteRegistry } from "./routes";
@@ -43,6 +44,8 @@ export function assertProductionChannel(routes: Route[]): void {
  *  the production-channel assertion is actually ON this path (probe M5: a direct-call test of
  *  assertProductionChannel proves the guard works, never that anything still invokes it). */
 export function buildRunner(env: Record<string, string | undefined>): { runner: BrokerRunner; intervalMs: number; maxPolls: number } {
+  // secrets here are envelope-auth only (brokerKey/ownerId) — NO Discord credential (owner
+  // contract 2026-08-14: "Broker owns route audit dedupe mirror and has no Discord credential").
   const secrets = loadRunnerSecrets(env);
   const routesFile = env.MAW_BROKER_ROUTES_FILE;
   const storeRoot = env.MAW_BROKER_STORE_ROOT;
@@ -57,7 +60,8 @@ export function buildRunner(env: Record<string, string | undefined>): { runner: 
   const channel = routes[0]!.destination;
   const store = new DurableStore(join(storeRoot, "store"));
   const broker = new Broker(secrets.brokerKey, registry, store, secrets.ownerId);
-  const client = new DiscordRestClient(secrets.discordBotToken);
+  const { bridgeUrl, localAuthToken } = loadBridgeClientConfig(env);
+  const client = new BridgeHttpClient(bridgeUrl, localAuthToken);
   const runner = new BrokerRunner({
     source: new DiscordPollSource(client, channel),
     ingress: new BrokerIngress(broker),
