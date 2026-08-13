@@ -133,10 +133,15 @@ export class BrokerRunner {
     for (const message of messages) {
       const decision = message.content === "approve" ? "allow" : message.content === "reject" ? "deny" : undefined;
       if (!decision) { const ignored = await this.options.ingress.ignore(message); if (ignored.cursor !== "advance") return { processed, held: true }; this.options.cursor.advance(message.messageId); continue; }
-      await this.ack(message, ACK_ACCEPTED);
       const envelope = seal(this.options.key, message.route, message.messageId, message.content, "discord-text", decision);
       const result = await this.options.ingress.handle(message, envelope, decision, this.injector);
-      if (result.outcome === "RESOLVED") await this.ack(message, ACK_RESOLVED);
+      // 👀 fires ONLY after durable acceptance (probe G6: firing it before ingress.handle gave
+      // foreign/bot commands a "broker accepted" signal and let any outsider poke the bot).
+      // Post-acceptance outcomes are exactly RESOLVED (owner command resolved) and
+      // INJECTOR_FAILURE (owner command accepted, awaiting receiver) — both got past every auth
+      // gate and wrote an "accepted" audit row. OWNER_MISMATCH is a pre-acceptance reject → ❌ only.
+      if (result.outcome === "RESOLVED") { await this.ack(message, ACK_ACCEPTED); await this.ack(message, ACK_RESOLVED); }
+      else if (result.outcome === "INJECTOR_FAILURE") await this.ack(message, ACK_ACCEPTED);
       else if (result.outcome === "OWNER_MISMATCH") await this.ack(message, ACK_REJECTED);
       if (result.cursor !== "advance") return { processed, held: true };
       this.options.cursor.advance(message.messageId); processed++;

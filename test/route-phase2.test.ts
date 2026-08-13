@@ -81,11 +81,26 @@ test("ack: owner approve reacts accepted then resolved", async () => {
   expect(calls).toEqual([`100:${ACK_ACCEPTED}`, `100:${ACK_RESOLVED}`]);
   f.run.close();
 });
-test("ack: bot approve reacts accepted then rejected", async () => {
+test("ack: bot approve reacts rejected ONLY — no 👀 for a command that never reached acceptance", async () => {
   const { calls, reactor } = recordingReactor();
   const f = fixture([row("100", "approve", "999", { author: { id: "999", bot: true } })], undefined, undefined, reactor);
   await f.run.runOnce();
-  expect(calls).toEqual([`100:${ACK_ACCEPTED}`, `100:${ACK_REJECTED}`]);
+  expect(calls).toEqual([`100:${ACK_REJECTED}`]);
+  f.run.close();
+});
+test("ack: foreign human approve reacts rejected ONLY — outsiders cannot make the bot show 👀", async () => {
+  const { calls, reactor } = recordingReactor();
+  const f = fixture([row("100", "approve", "111111111111111111")], undefined, undefined, reactor);
+  await f.run.runOnce();
+  expect(calls).toEqual([`100:${ACK_REJECTED}`]);
+  f.run.close();
+});
+test("ack: injector failure reacts accepted ONLY — 👀 without a false ✅, cursor holds", async () => {
+  const { calls, reactor } = recordingReactor();
+  const failing = async () => { throw new Error("no receiver"); };
+  const f = fixture([row("100")], undefined, failing, reactor);
+  expect(await f.run.runOnce()).toEqual({ processed: 0, held: true });
+  expect(calls).toEqual([`100:${ACK_ACCEPTED}`]);
   f.run.close();
 });
 test("ack: replay across restart re-reacts resolved (idempotent re-PUT)", async () => {
