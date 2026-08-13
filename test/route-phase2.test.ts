@@ -191,3 +191,24 @@ test("audit below capacity appends to the same file", () => {
   const { readdirSync } = require("node:fs") as typeof import("node:fs");
   expect(readdirSync(join(root, "store")).filter((f: string) => f.startsWith("audit")).length).toBe(1);
 });
+
+// ── Route launcher config: exact allowlist, fail-closed (constraint A)
+import { loadRoutesFile } from "../src/route-launcher";
+test("routes file: exactly one discord-text route with numeric destination and agent", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-p2-routes-"));
+  const path = join(root, "routes.json");
+  writeFileSync(path, JSON.stringify([{ name: "general", transport: "discord-text", destination: "1056224550129508415", agent: "03-canon:0" }]), { mode: 0o600 });
+  expect(loadRoutesFile(path)).toEqual([{ name: "general", transport: "discord-text", destination: "1056224550129508415", agent: "03-canon:0" }]);
+});
+test("routes file rejects wrong mode, two routes, fuzzy destination, missing agent", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-p2-routes-bad-"));
+  const good = { name: "general", transport: "discord-text", destination: "1056224550129508415", agent: "03-canon:0" };
+  const open = join(root, "open.json"); writeFileSync(open, JSON.stringify([good]), { mode: 0o644 });
+  expect(() => loadRoutesFile(open)).toThrow("routes file invalid");
+  const two = join(root, "two.json"); writeFileSync(two, JSON.stringify([good, good]), { mode: 0o600 });
+  expect(() => loadRoutesFile(two)).toThrow("exactly one route");
+  const fuzzy = join(root, "fuzzy.json"); writeFileSync(fuzzy, JSON.stringify([{ ...good, destination: "broker-canary" }]), { mode: 0o600 });
+  expect(() => loadRoutesFile(fuzzy)).toThrow("destination invalid");
+  const agentless = join(root, "agentless.json"); writeFileSync(agentless, JSON.stringify([{ ...good, agent: "" }]), { mode: 0o600 });
+  expect(() => loadRoutesFile(agentless)).toThrow("agent invalid");
+});
