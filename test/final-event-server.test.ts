@@ -30,6 +30,20 @@ async function post(port: number, body: unknown, token = SECRETS.authorizedToken
   });
 }
 
+describe("final-event-server — /health (loopback receiver check, no auth required)", () => {
+  test("GET /health returns ok + pid + startedAt without any Authorization header", async () => {
+    const port = 18830;
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    servers.push(server);
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("ok");
+    expect(typeof body.pid).toBe("number");
+    expect(new Date(body.startedAt).toString()).not.toBe("Invalid Date");
+  });
+});
+
 describe("final-event-server — real local HTTP round trip", () => {
   test("accepted then duplicate over real HTTP, in-memory store", async () => {
     const port = 18811;

@@ -30,12 +30,19 @@ const STATUS_FOR_CODE: Record<string, number> = {
 export function startFinalEventServer(options: FinalEventServerOptions) {
   const hostname = options.hostname ?? LOOPBACK_ONLY;
   if (hostname !== LOOPBACK_ONLY) throw new Error("final-event server refuses to bind outside 127.0.0.1");
+  const startedAt = new Date().toISOString();
 
   return Bun.serve({
     port: options.port,
     hostname,
     async fetch(req: Request): Promise<Response> {
       const url = new URL(req.url);
+      // Liveness only, deliberately unauthenticated — same reasoning as bridge-server.ts's
+      // /health: pid/startedAt are not secrets, and a probe gated by the credential it exists
+      // to help debug is useless during an auth misconfiguration.
+      if (req.method === "GET" && url.pathname === "/health") {
+        return new Response(JSON.stringify({ status: "ok", pid: process.pid, startedAt }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       if (req.method !== "POST" || url.pathname !== "/final-event") return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
       let body: unknown;
       try { body = await req.json(); } catch { return new Response(JSON.stringify({ error: "malformed body" }), { status: 400 }); }

@@ -108,6 +108,26 @@ describe("bridge-server + bridge-client — real local HTTP round trip, fake Dis
   });
 });
 
+describe("bridge-server — /health (loopback receiver check, no auth required)", () => {
+  test("GET /health returns ok + pid + startedAt without any Authorization header", async () => {
+    const port = 18801;
+    await serverOn(port, fakeDiscordFetcher(() => ({ status: 200, body: {} })));
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("ok");
+    expect(typeof body.pid).toBe("number");
+    expect(new Date(body.startedAt).toString()).not.toBe("Invalid Date");
+  });
+  test("/health never touches the Discord layer (no fake-fetcher calls)", async () => {
+    const port = 18802;
+    let discordCalls = 0;
+    await serverOn(port, fakeDiscordFetcher(() => { discordCalls++; return { status: 200, body: {} }; }));
+    await fetch(`http://127.0.0.1:${port}/health`);
+    expect(discordCalls).toBe(0);
+  });
+});
+
 describe("bridge-server refuses to bind outside loopback", () => {
   test("startBridgeServer throws for any hostname other than 127.0.0.1", () => {
     expect(() => startBridgeServer({ port: 18800, hostname: "0.0.0.0", secrets: SECRETS })).toThrow("refuses to bind outside 127.0.0.1");

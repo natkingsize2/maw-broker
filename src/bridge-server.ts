@@ -68,15 +68,24 @@ export function startBridgeServer(options: BridgeServerOptions) {
   const hostname = options.hostname ?? LOOPBACK_ONLY;
   if (hostname !== LOOPBACK_ONLY) throw new Error("bridge server refuses to bind outside 127.0.0.1");
   const client = new DiscordRestClient(options.secrets.discordBotToken, options.fetcher);
+  const startedAt = new Date().toISOString();
 
   const server = Bun.serve({
     port: options.port,
     hostname,
     async fetch(req: Request): Promise<Response> {
+      const url = new URL(req.url);
+      // Liveness only, deliberately unauthenticated: pid/startedAt are not secrets (the same
+      // class of fact already shared openly throughout this fleet's own process-identity
+      // discipline), and a health probe that itself required the credential it exists to help
+      // debug would be useless during an auth misconfiguration. No Discord data, no token, no
+      // request body is ever touched on this path.
+      if (req.method === "GET" && url.pathname === "/health") {
+        return new Response(JSON.stringify({ status: "ok", pid: process.pid, startedAt }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       const auth = req.headers.get("authorization");
       if (auth !== `Bearer ${options.secrets.localAuthToken}`) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
       if (req.method !== "POST") return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
-      const url = new URL(req.url);
       const route = ROUTES.find(r => r.path === url.pathname);
       if (!route) return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
       let body: unknown;
