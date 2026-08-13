@@ -66,8 +66,6 @@ trustworthy only to the degree the maw API is authorized/reachable** — port 34
 the ceiling on its strength. Fix belongs in maw-js (auth on `/api/reply`; close or
 loopback-bind `/api/requests`), not in this broker.
 
-- Upstream issue (maw hey/capture same-channel echo + unauthenticated reply): _URL recorded in
-  acceptance log once filed (patch to `natkingsize2` mirror or owner-owned repo only; per house
-  rule no `gh issue create` on third-party repos)._
+- Upstream issue (maw hey/capture same-channel echo + unauthenticated reply): https://github.com/natkingsize2/maw-js-mirror/issues/14 (owner mirror; escalate upstream at owner discretion).
 - G6 residual HOLD: reaction live ordering (👀→✅) and idempotency across restart are proven at
   the unit level only; live Discord ordering not yet exercised.
