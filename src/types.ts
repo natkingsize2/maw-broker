@@ -4,6 +4,8 @@ export type Route = {
   name: string;
   transport: string;
   destination: string;
+  /** maw target that owns this room (e.g. "03-canon:0" or "mba:02-anvil"); phase-2 routing table. */
+  agent?: string;
 };
 
 export type BrokerEnvelope = {
