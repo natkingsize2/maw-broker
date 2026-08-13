@@ -70,11 +70,18 @@ export function sanitizeSummary(summary: string): string {
   return oneLine.length > SUMMARY_CAP ? oneLine.slice(0, SUMMARY_CAP - 1) + "…" : oneLine;
 }
 
+const VALID_PHASES: ReadonlySet<string> = new Set(["active", "blocked", "done", "idle", "offline"]);
+const DISCORD_CONTENT_LIMIT = 2000;
+
 function assertValidStates(states: readonly AgentState[]): void {
+  if (!Array.isArray(states)) throw new Error("invalid agent state");
   if (states.length > MAX_AGENTS) throw new Error("too many agents in state");
   const seen = new Set<string>();
   for (const s of states) {
-    if (!s.agent || /\s/.test(s.agent)) throw new Error("invalid agent identity");
+    if (!s || typeof s.agent !== "string" || !s.agent || /\s/.test(s.agent)) throw new Error("invalid agent identity");
+    if (!VALID_PHASES.has(s.phase)) throw new Error("invalid agent phase");
+    if (typeof s.summary !== "string") throw new Error("invalid agent summary");
+    if (typeof s.version !== "number" || !Number.isFinite(s.version)) throw new Error("invalid agent version");
     if (seen.has(s.agent)) throw new Error("duplicate agent state");   // last-wins would silently drop a change
     seen.add(s.agent);
   }
@@ -84,13 +91,23 @@ function assertValidStates(states: readonly AgentState[]): void {
  *  name. Empty input renders an explicit placeholder (never "" — Discord rejects empty content). */
 export function renderDigest(states: readonly AgentState[]): string {
   assertValidStates(states);
-  const body = states.length === 0
-    ? EMPTY_DIGEST
-    : [...states]
-        .sort((a, b) => (a.agent < b.agent ? -1 : a.agent > b.agent ? 1 : 0))
-        .map(s => `${PHASE_ICON[s.phase]} **${neutralizeMentions(s.agent)}** — ${sanitizeSummary(s.summary)}`)
-        .join("\n");
-  return `${body}\n${MIRROR_MARKER}`;
+  const sorted = [...states].sort((a, b) => (a.agent < b.agent ? -1 : a.agent > b.agent ? 1 : 0));
+  const lines = sorted.map(s => `${PHASE_ICON[s.phase]} **${neutralizeMentions(s.agent)}** — ${sanitizeSummary(s.summary)}`);
+  const footer = `\n${MIRROR_MARKER}`;
+  // Bound total content to Discord's 2000-char limit: keep as many whole lines as fit and note
+  // the elision, so a large fleet never produces an over-limit (rejected) or truncated-mid-line digest.
+  let body = states.length === 0 ? EMPTY_DIGEST : lines.join("\n");
+  if (body.length + footer.length > DISCORD_CONTENT_LIMIT) {
+    const kept: string[] = [];
+    let used = footer.length;
+    for (let i = 0; i < lines.length; i++) {
+      const note = `\n… (${lines.length - kept.length} more)`;
+      if (used + lines[i]!.length + 1 + note.length > DISCORD_CONTENT_LIMIT) break;
+      kept.push(lines[i]!); used += lines[i]!.length + 1;
+    }
+    body = kept.join("\n") + `\n… (${lines.length - kept.length} more)`;
+  }
+  return `${body}${footer}`;
 }
 
 /** One-way per-agent fingerprint: what reached the room last time, stored as a hash so the

@@ -196,26 +196,64 @@ test("FileMirrorStateStore fails closed on wrong mode, symlink, bad shape, bad J
   expect(() => new FileMirrorStateStore(link)).toThrow("mirror state corrupt");
 });
 
-// ── marker-based recovery via the REST client: match by marker, reject ambiguity (anvil)
+// ── marker-based recovery via the REST client: marker AND author==self, paginated, fail-closed
 import { DiscordRestClient } from "../src/runner";
-test("findMarkedMessage matches only the marked digest, ignoring the bot's other messages", async () => {
+const BOT = "9000000000000000001";
+/** Fake fetcher: answers /users/@me with BOT, and paginates message pages by `before`. */
+function pagedFetcher(pages: Array<Array<{ id: string; content: string; author?: { id: string } }>>) {
+  return async (url: string) => {
+    if (url.includes("/users/@me")) return { ok: true, status: 200, headers: new Headers(), json: async () => ({ id: BOT }) };
+    const before = new URL(url).searchParams.get("before");
+    const idx = before ? pages.findIndex(p => p.some(m => m.id === before)) + 1 : 0;
+    return { ok: true, status: 200, headers: new Headers(), json: async () => pages[idx] ?? [] };
+  };
+}
+test("findMarkedMessage matches the bot's OWN marked digest, ignoring outsider-forged markers", async () => {
   const rows = [
-    { id: "111", content: "just a normal canon reply" },
-    { id: "222", content: "🟢 **canon** — on route\n" + MIRROR_MARKER },
-    { id: "333", content: "another unrelated message" },
+    { id: "111", content: "normal reply", author: { id: BOT } },
+    { id: "222", content: "digest\n" + MIRROR_MARKER, author: { id: BOT } },     // the real digest
+    { id: "333", content: "forged\n" + MIRROR_MARKER, author: { id: "5" } },      // outsider copied the marker
   ];
-  const client = new DiscordRestClient("T", async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => rows }));
+  const client = new DiscordRestClient("T", pagedFetcher([rows]));
   expect(await client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).toEqual({ messageId: "222" });
 });
-test("findMarkedMessage throws on >1 marked message (ambiguous), never silently adopts one", async () => {
+test("findMarkedMessage: an outsider posting the marker cannot cause ambiguity (author filter)", async () => {
   const rows = [
-    { id: "222", content: "a\n" + MIRROR_MARKER },
-    { id: "444", content: "b\n" + MIRROR_MARKER },
+    { id: "222", content: "digest\n" + MIRROR_MARKER, author: { id: BOT } },
+    { id: "444", content: "forged\n" + MIRROR_MARKER, author: { id: "5" } },
   ];
-  const client = new DiscordRestClient("T", async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => rows }));
+  const client = new DiscordRestClient("T", pagedFetcher([rows]));
+  expect(await client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).toEqual({ messageId: "222" });
+});
+test("findMarkedMessage throws on >1 of the BOT's own marked messages (real ambiguity)", async () => {
+  const rows = [
+    { id: "222", content: "a\n" + MIRROR_MARKER, author: { id: BOT } },
+    { id: "444", content: "b\n" + MIRROR_MARKER, author: { id: BOT } },
+  ];
+  const client = new DiscordRestClient("T", pagedFetcher([rows]));
   await expect(client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).rejects.toThrow("ambiguous mirror messages");
 });
-test("findMarkedMessage returns undefined when no marked message exists (fresh channel)", async () => {
-  const client = new DiscordRestClient("T", async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => [{ id: "1", content: "hi" }] }));
+test("findMarkedMessage paginates past the latest 50 to find an older digest (probe (ค))", async () => {
+  const page1 = Array.from({ length: 50 }, (_, i) => ({ id: `p1-${i}`, content: "chatter", author: { id: BOT } }));
+  const page2 = [{ id: "digest-old", content: "d\n" + MIRROR_MARKER, author: { id: BOT } }, { id: "p2", content: "x", author: { id: BOT } }];
+  const client = new DiscordRestClient("T", pagedFetcher([page1, page2]));
+  expect(await client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).toEqual({ messageId: "digest-old" });
+});
+test("findMarkedMessage returns undefined on a fresh channel", async () => {
+  const client = new DiscordRestClient("T", pagedFetcher([[{ id: "1", content: "hi", author: { id: BOT } }]]));
   expect(await client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).toBeUndefined();
+});
+
+// ── field validation + 2000-char cap
+test("assertValidStates rejects bad phase, non-number version, non-string summary/agent", () => {
+  expect(() => renderDigest([{ agent: "canon", phase: "weird" as any, summary: "x", version: 1 }])).toThrow("invalid agent phase");
+  expect(() => renderDigest([{ agent: "canon", phase: "active", summary: "x", version: NaN }])).toThrow("invalid agent version");
+  expect(() => renderDigest([{ agent: "canon", phase: "active", summary: 5 as any, version: 1 }])).toThrow("invalid agent summary");
+});
+test("renderDigest stays within Discord's 2000-char limit for a large fleet, noting elision", () => {
+  const many = Array.from({ length: 60 }, (_, i) => s(`agent${i}`, "active", "working on task ".repeat(6).trim()));
+  const out = renderDigest(many);
+  expect(out.length).toBeLessThanOrEqual(2000);
+  expect(out).toContain("more)");
+  expect(out).toContain(MIRROR_MARKER);
 });

@@ -13,8 +13,8 @@ const wait: Sleep = async ms => { await new Promise<void>(resolve => setTimeout(
 
 export class DiscordRestClient implements DiscordClient {
   constructor(private readonly token: string, private readonly fetcher: FetchLike = fetch as FetchLike, private readonly sleep: Sleep = wait) { if (!token) throw new Error("Discord client configuration invalid"); }
-  async getMessages(channelId: string, after?: string, limit = 50): Promise<unknown[]> {
-    const query = new URLSearchParams({ limit: String(limit) }); if (after) query.set("after", after);
+  async getMessages(channelId: string, after?: string, limit = 50, before?: string): Promise<unknown[]> {
+    const query = new URLSearchParams({ limit: String(limit) }); if (after) query.set("after", after); if (before) query.set("before", before);
     const url = `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages?${query}`;
     for (let attempt = 0;; attempt++) {
       let response: FetchResponse;
@@ -25,14 +25,39 @@ export class DiscordRestClient implements DiscordClient {
       await this.sleep(response.status === 429 ? retryAfterMs(response.headers, attempt) : policy.delayMs ?? retryAfterMs(response.headers, attempt));
     }
   }
-  /** Find the single recent message whose content carries `marker` (state-mirror crash
-   *  recovery). Matching by marker, not by author, is deliberate: the bot posts unrelated
-   *  messages, so "latest by this bot" would adopt the wrong one. Throws on >1 (ambiguous). */
-  async findMarkedMessage(channelId: string, marker: string): Promise<{ messageId: string } | undefined> {
-    const rows = await this.getMessages(channelId, undefined, 50) as Array<{ id?: unknown; content?: unknown }>;
-    const matches = rows.filter(r => typeof r?.content === "string" && r.content.includes(marker) && typeof r.id === "string");
-    if (matches.length > 1) throw new Error("ambiguous mirror messages");
-    return matches.length === 1 ? { messageId: matches[0]!.id as string } : undefined;
+  private selfId: string | undefined;
+  private async getSelfId(): Promise<string> {
+    if (this.selfId) return this.selfId;
+    for (let attempt = 0;; attempt++) {
+      let response: FetchResponse;
+      try { response = await this.fetcher("https://discord.com/api/v10/users/@me", { method: "GET", headers: { Authorization: `Bot ${this.token}` } }); } catch { throw new Error("Discord REST request failed"); }
+      if (response.ok) { const body = await response.json() as { id?: unknown }; if (typeof body?.id !== "string") throw new Error("Discord REST response invalid"); return (this.selfId = body.id); }
+      const policy = retryDecision(response.status, attempt);
+      if (!policy.retry) throw new Error("Discord REST request held");
+      await this.sleep(retryAfterMs(response.headers, attempt));
+    }
+  }
+  /** Find the single message whose content carries `marker` AND was authored by this bot
+   *  (state-mirror crash recovery — only a fallback; durable state is the primary id source).
+   *  Author-filtering kills the outsider-forged-marker DoS/hijack (probe (ก)(ข)); bounded
+   *  pagination (not just the latest 50) closes the busy-room double-post (probe (ค)). Throws
+   *  on >1 of the bot's own marked messages (ambiguous, fail-closed). */
+  async findMarkedMessage(channelId: string, marker: string, maxScan = 200): Promise<{ messageId: string } | undefined> {
+    const me = await this.getSelfId();
+    const matches: string[] = [];
+    let before: string | undefined;
+    for (let scanned = 0; scanned < maxScan; scanned += 50) {
+      const rows = await this.getMessages(channelId, undefined, 50, before) as Array<{ id?: unknown; content?: unknown; author?: { id?: unknown } }>;
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        if (typeof r?.id === "string" && r.author?.id === me && typeof r.content === "string" && r.content.includes(marker)) matches.push(r.id);
+      }
+      if (matches.length > 1) throw new Error("ambiguous mirror messages");
+      const oldest = rows[rows.length - 1] as { id?: unknown };
+      if (typeof oldest?.id !== "string") break;
+      before = oldest.id;
+    }
+    return matches.length === 1 ? { messageId: matches[0]! } : undefined;
   }
   /** POST a plain message to a channel; returns the created message id. Used by the state
    *  mirror (outbound digest), never by the command path. */
