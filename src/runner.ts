@@ -7,7 +7,7 @@ import { retryAfterMs, retryDecision } from "./retry";
 import type { DownstreamInjector, InboundMessage } from "./types";
 
 type FetchResponse = { ok: boolean; status: number; headers: Headers; json(): Promise<unknown> };
-type FetchLike = (url: string, init: { method: "GET" | "PUT"; headers: Record<string, string> }) => Promise<FetchResponse>;
+type FetchLike = (url: string, init: { method: "GET" | "PUT" | "POST" | "PATCH"; headers: Record<string, string>; body?: string }) => Promise<FetchResponse>;
 type Sleep = (ms: number) => Promise<void>;
 const wait: Sleep = async ms => { await new Promise<void>(resolve => setTimeout(resolve, ms)); };
 
@@ -20,6 +20,31 @@ export class DiscordRestClient implements DiscordClient {
       let response: FetchResponse;
       try { response = await this.fetcher(url, { method: "GET", headers: { Authorization: `Bot ${this.token}` } }); } catch { throw new Error("Discord REST request failed"); }
       if (response.ok) { const body = await response.json(); if (!Array.isArray(body)) throw new Error("Discord REST response invalid"); return body; }
+      const policy = retryDecision(response.status, attempt);
+      if (!policy.retry) throw new Error("Discord REST request held");
+      await this.sleep(response.status === 429 ? retryAfterMs(response.headers, attempt) : policy.delayMs ?? retryAfterMs(response.headers, attempt));
+    }
+  }
+  /** POST a plain message to a channel; returns the created message id. Used by the state
+   *  mirror (outbound digest), never by the command path. */
+  async postMessage(channelId: string, content: string): Promise<{ messageId: string }> {
+    const url = `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`;
+    for (let attempt = 0;; attempt++) {
+      let response: FetchResponse;
+      try { response = await this.fetcher(url, { method: "POST", headers: { Authorization: `Bot ${this.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ content }) } ); } catch { throw new Error("Discord REST request failed"); }
+      if (response.ok) { const body = await response.json() as { id?: unknown }; if (typeof body?.id !== "string") throw new Error("Discord REST response invalid"); return { messageId: body.id }; }
+      const policy = retryDecision(response.status, attempt);
+      if (!policy.retry) throw new Error("Discord REST request held");
+      await this.sleep(response.status === 429 ? retryAfterMs(response.headers, attempt) : policy.delayMs ?? retryAfterMs(response.headers, attempt));
+    }
+  }
+  /** PATCH an existing message (edit-in-place) so the room holds one living digest. */
+  async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
+    const url = `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`;
+    for (let attempt = 0;; attempt++) {
+      let response: FetchResponse;
+      try { response = await this.fetcher(url, { method: "PATCH", headers: { Authorization: `Bot ${this.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ content }) } ); } catch { throw new Error("Discord REST request failed"); }
+      if (response.ok) return;
       const policy = retryDecision(response.status, attempt);
       if (!policy.retry) throw new Error("Discord REST request held");
       await this.sleep(response.status === 429 ? retryAfterMs(response.headers, attempt) : policy.delayMs ?? retryAfterMs(response.headers, attempt));
