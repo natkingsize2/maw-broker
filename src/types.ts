@@ -6,6 +6,9 @@ export type Route = {
   destination: string;
   /** maw target that owns this room (e.g. "03-canon:0" or "mba:02-anvil"); phase-2 routing table. */
   agent?: string;
+  /** git issue this room is the human face of, e.g. "natkingsize2/maw-broker#1" — the owner's
+   *  phase-4 data model: git issue = source of truth, the Discord room references it. */
+  issue?: string;
 };
 
 export type BrokerEnvelope = {
