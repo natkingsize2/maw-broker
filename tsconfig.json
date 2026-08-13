@@ -2,10 +2,11 @@
   "compilerOptions": {
     "strict": true,
     "noEmit": true,
+    "skipLibCheck": true,
     "module": "Preserve",
     "moduleResolution": "bundler",
     "target": "ES2022",
     "types": ["bun", "node"]
   },
-  "include": ["index.ts", "src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

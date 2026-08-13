@@ -21,7 +21,7 @@ export class Broker {
     const registered=this.routes.get(input.route); if (!registered || envelope.route !== input.route) return this.reject(input, "CHANNEL_NOT_PROJECT", "wrong route"); if (envelope.transport !== registered.transport || registered.transport !== "discord-text") return this.reject(input, "TRANSPORT_FAILURE", "transport mismatch");
     if (input.authorId !== this.ownerId) return this.reject(input, "OWNER_MISMATCH", "foreign author");
     if (envelope.messageId !== input.messageId) return this.reject(input, "AUTH_FAILURE", "message id mismatch");
-    if (envelope.transport !== "discord-text" || envelope.decision !== decision) return this.reject(input, "AUTH_FAILURE", "decision or transport mismatch");
+    if (envelope.transport !== "discord-text" || envelope.decision !== decision) return this.reject(input, "AUTH_FAILURE", "decision mismatch");
     let plaintext: string;
     try { plaintext = open(this.key, envelope); } catch { this.store.audit({ at: new Date().toISOString(), event: "error", messageId: input.messageId, route: input.route, reason: "authentication failed" }); throw new BrokerError("AUTH_FAILURE", "envelope authentication failed"); }
     const state=this.store.begin(input.messageId); if(state==="resolved"){this.store.audit({at:new Date().toISOString(),event:"replay",messageId:input.messageId,route:input.route});return {status:"replay"};}

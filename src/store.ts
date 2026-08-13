@@ -8,6 +8,7 @@ export class DurableStore {
   readonly auditPath: string;
   readonly statePath: string;
   private states: Map<string, "pending"|"resolved">;
+  // This only coordinates concurrent receives inside this Node/Bun process; runner.ts owns cross-process exclusion.
   private static readonly activeAttempts = new Set<string>();
 
   constructor(root: string) {
@@ -31,9 +32,9 @@ export class DurableStore {
     this.withLock(()=>{ const current=this.readStates(); current[messageId]="resolved"; this.writeStates(current); this.states=new Map(Object.entries(current) as any); }); this.finishAttempt(messageId);
   }
 
-  private readStates(): Record<string,"pending"|"resolved"> { if(!existsSync(this.statePath)) return {}; const x=JSON.parse(readFileSync(this.statePath,"utf8")); if(!x||typeof x!=="object"||Array.isArray(x)||Object.values(x).some((v:any)=>v!=="pending"&&v!=="resolved")) throw new Error("resolved state corrupt"); return x; }
+  private readStates(): Partial<Record<string,"pending"|"resolved">> { if(!existsSync(this.statePath)) return {}; const x=JSON.parse(readFileSync(this.statePath,"utf8")); if(!x||typeof x!=="object"||Array.isArray(x)||Object.values(x).some((v:any)=>v!=="pending"&&v!=="resolved")) throw new Error("resolved state corrupt"); return x; }
   private attemptKey(messageId: string) { return `${this.statePath}\u0000${messageId}`; }
-  private writeStates(current: Record<string,"pending"|"resolved">) { const tmp=`${this.statePath}.tmp-${process.pid}`; writeFileSync(tmp,JSON.stringify(current,null,2)+"\n",{encoding:"utf8",mode:0o600}); const fd=openSync(tmp,"r"); fsyncSync(fd); closeSync(fd); renameSync(tmp,this.statePath); const dirfd=openSync(dirname(this.statePath),"r"); fsyncSync(dirfd); closeSync(dirfd); chmodSync(this.statePath,0o600); }
+  private writeStates(current: Partial<Record<string,"pending"|"resolved">>) { const tmp=`${this.statePath}.tmp-${process.pid}`; writeFileSync(tmp,JSON.stringify(current,null,2)+"\n",{encoding:"utf8",mode:0o600}); const fd=openSync(tmp,"r"); fsyncSync(fd); closeSync(fd); renameSync(tmp,this.statePath); const dirfd=openSync(dirname(this.statePath),"r"); fsyncSync(dirfd); closeSync(dirfd); chmodSync(this.statePath,0o600); }
 
   private withLock(fn:()=>void) { const lock=this.statePath+".lock"; let fd:number|undefined; for(let i=0;i<100;i++){try{fd=openSync(lock,"wx",0o600);writeFileSync(fd,`${process.pid} ${Date.now()}`);break}catch{try{const raw=readFileSync(lock,"utf8").trim();const s=raw.split(/\s+/);const valid=s.length===2&&/^\d+$/.test(s[0])&&/^\d+$/.test(s[1]);const stale=!valid||Date.now()-Number(s[1])>30000;let dead=false;if(valid){try{process.kill(Number(s[0]),0)}catch{dead=true}}if(stale||dead)unlinkSync(lock)}catch{} Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2)}} if(fd===undefined) throw new Error("store lock timeout"); try{fn()}finally{closeSync(fd);unlinkSync(lock)}}
 }
