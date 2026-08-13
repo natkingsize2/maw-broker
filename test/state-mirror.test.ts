@@ -1,179 +1,221 @@
 import { expect, test } from "bun:test";
-import { renderDigest, sanitizeSummary, diffSnapshot, StateMirror, DiscordDigestSink, type AgentState, type DigestSink, type MirrorSnapshot } from "../src/state-mirror";
+import { mkdtempSync, writeFileSync as wf, symlinkSync, statSync, chmodSync as chm } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  renderDigest, sanitizeSummary, diffSnapshot, StateMirror, DiscordDigestSink, FileMirrorStateStore, MIRROR_MARKER,
+  type AgentState, type DigestSink, type MirrorState, type MirrorStateStore,
+} from "../src/state-mirror";
 
 const s = (agent: string, phase: AgentState["phase"], summary: string, version = 1): AgentState => ({ agent, phase, summary, version });
 
-// ── render: one deterministic line per agent, phase icon, sorted
-test("renderDigest sorts by agent and shows one line each with a phase icon", () => {
-  const out = renderDigest([s("mason", "active", "fixing primary_edge"), s("canon", "blocked", "waiting on anvil")]);
-  const lines = out.split("\n");
-  expect(lines.length).toBe(2);
-  expect(lines[0]).toContain("canon");   // sorted before mason
-  expect(lines[0]).toContain("🔴");
-  expect(lines[1]).toContain("mason");
-  expect(lines[1]).toContain("🟢");
-});
-
-// ── sanitize: summaries are labels, never payloads
-test("sanitizeSummary collapses whitespace and caps length", () => {
-  expect(sanitizeSummary("  a   b\n c  ")).toBe("a b c");
-  const long = "x".repeat(200);
-  expect(sanitizeSummary(long).length).toBe(118);
-  expect(sanitizeSummary(long).endsWith("…")).toBe(true);
-});
-
-// ── diff/coalesce: identical fingerprints emit nothing even when version bumps
-test("diffSnapshot coalesces a version bump that renders identically", () => {
-  const first = diffSnapshot([s("canon", "active", "on route", 1)], new Map());
-  expect(first.changed).toBe(true);
-  const again = diffSnapshot([s("canon", "active", "on route", 99)], first.next);  // version up, same render
-  expect(again.changed).toBe(false);
-});
-test("diffSnapshot detects a phase change, a summary change, and agent add/remove", () => {
-  const base = diffSnapshot([s("canon", "active", "on route")], new Map()).next;
-  expect(diffSnapshot([s("canon", "blocked", "on route")], base).changed).toBe(true);
-  expect(diffSnapshot([s("canon", "active", "different")], base).changed).toBe(true);
-  expect(diffSnapshot([s("canon", "active", "on route"), s("mason", "idle", "x")], base).changed).toBe(true);
-  expect(diffSnapshot([], base).changed).toBe(true);
-});
-
-// ── mirror: post once, edit-in-place after, noop on no change
-function recordingSink() {
+/** In-memory sink: records calls, holds a single "posted" message, supports crash recovery. */
+function recordingSink(recovered?: string) {
   const calls: string[] = [];
+  let posted: string | undefined = recovered;
   const sink: DigestSink = {
-    post: async (text) => { calls.push(`post:${text.split("\n").length}`); return { messageId: "msg-1" }; },
+    post: async (text) => { calls.push(`post:${text.split("\n").length}`); posted = "1000000000000000001"; return { messageId: "1000000000000000001" }; },
     edit: async (id, text) => { calls.push(`edit:${id}:${text.split("\n").length}`); },
+    recover: async () => { calls.push("recover"); return posted ? { messageId: posted } : undefined; },
   };
-  return { calls, sink };
+  return { calls, sink, seedPosted: (id: string) => { posted = id; } };
 }
-
-test("StateMirror posts once then edits the same message; unchanged state is a noop", async () => {
-  const { calls, sink } = recordingSink();
-  const mirror = new StateMirror(sink);
-  expect(await mirror.reconcile([s("canon", "active", "a")])).toBe("posted");
-  expect(await mirror.reconcile([s("canon", "active", "a")])).toBe("noop");       // identical → no call
-  expect(await mirror.reconcile([s("canon", "blocked", "a")])).toBe("edited");    // change → edit same msg
-  expect(await mirror.reconcile([s("canon", "blocked", "a")], )).toBe("noop");
-  expect(calls).toEqual(["post:1", "edit:msg-1:1"]);
-});
-
-test("StateMirror never posts a second message — one living digest, not a stream", async () => {
-  const { calls, sink } = recordingSink();
-  const mirror = new StateMirror(sink);
-  await mirror.reconcile([s("a", "active", "1")]);
-  await mirror.reconcile([s("a", "active", "2")]);
-  await mirror.reconcile([s("a", "done", "3")]);
-  expect(calls.filter(c => c.startsWith("post:")).length).toBe(1);
-  expect(calls.filter(c => c.startsWith("edit:")).length).toBe(2);
-});
-
-// ── sink binds exactly one channel (single visible sink, anvil)
-test("DiscordDigestSink routes post/edit to exactly the configured channel", async () => {
-  const seen: string[] = [];
-  const client = {
-    postMessage: async (ch: string, text: string) => { seen.push(`post ${ch}`); return { messageId: "m1" }; },
-    editMessage: async (ch: string, id: string, text: string) => { seen.push(`edit ${ch} ${id}`); },
-  };
-  const sink = new DiscordDigestSink(client, "1056224550129508415");
-  await sink.post("x");
-  await sink.edit("m1", "y");
-  expect(seen).toEqual(["post 1056224550129508415", "edit 1056224550129508415 m1"]);
-});
-
-// ── digest carries no secrets: sanitize is applied on the render path
-test("a summary with newlines/padding is flattened in the rendered digest", () => {
-  const out = renderDigest([s("canon", "active", "line1\nline2   trailing")]);
-  expect(out).not.toContain("\nline2");
-  expect(out).toContain("line1 line2 trailing");
-});
-
-// ── anvil acceptance: EXACTLY ONE visible sink, ZERO to #canon, restart = no second message
-import type { MirrorState, MirrorStateStore } from "../src/state-mirror";
-
-test("both channels configured: a state change posts to project ONLY, canon count stays 0", async () => {
-  const counts: Record<string, number> = { project: 0, canon: 0 };
-  const client = {
-    postMessage: async (ch: string) => { counts[ch === "1056224550129508415" ? "project" : "canon"]++; return { messageId: "m1" }; },
-    editMessage: async (ch: string) => { counts[ch === "1056224550129508415" ? "project" : "canon"]++; },
-  };
-  // Only the project sink is wired — the canon channel client exists but the mirror never holds it.
-  const mirror = new StateMirror(new DiscordDigestSink(client, "1056224550129508415"));
-  await mirror.reconcile([s("canon", "active", "on route")]);
-  await mirror.reconcile([s("canon", "blocked", "waiting")]);
-  expect(counts.project).toBe(2);   // one post + one edit
-  expect(counts.canon).toBe(0);     // never
-});
-
 function memStore(): { store: MirrorStateStore; ref: { v?: MirrorState } } {
   const ref: { v?: MirrorState } = {};
   return { ref, store: { load: () => ref.v, save: (st) => { ref.v = st; } } };
 }
 
-test("restart replay produces NO second visible message — persisted id routes to edit", async () => {
+// ── render / sanitize
+test("renderDigest sorts by agent, one line each with a phase icon", () => {
+  const lines = renderDigest([s("mason", "active", "x"), s("canon", "blocked", "y")]).split("\n");
+  expect(lines[0]).toContain("canon"); expect(lines[0]).toContain("🔴");
+  expect(lines[1]).toContain("mason"); expect(lines[1]).toContain("🟢");
+});
+test("empty states render an explicit placeholder + marker, never empty content", () => {
+  expect(renderDigest([])).toContain("_(no agent state)_");
+  expect(renderDigest([])).toContain(MIRROR_MARKER);
+});
+test("every digest carries the recovery marker", () => {
+  expect(renderDigest([s("canon", "active", "x")])).toContain(MIRROR_MARKER);
+});
+test("sanitizeSummary collapses whitespace and caps length", () => {
+  expect(sanitizeSummary("  a   b\n c  ")).toBe("a b c");
+  expect(sanitizeSummary("word ".repeat(40)).length).toBe(120);   // spaced words: not a token, so not redacted
+});
+
+// ── secret redaction (constraint G — last gate before a public room)
+const FAKE_TOKEN = "MTIzNDU2Nzg5MDEyMzQ1Njc.SECRETPART.ZZQ7aaaaaaaaaaaaaaaaaaaaaaaaaaa";
+test("sanitizeSummary redacts a token/JWT-shaped secret", () => {
+  expect(sanitizeSummary(`deploying with ${FAKE_TOKEN}`)).toContain("[redacted]");
+  expect(sanitizeSummary("key=abcdefghijklmnopqrstuvwxyz0123456789ABCD")).toContain("[redacted]");
+  expect(sanitizeSummary(`deploying with ${FAKE_TOKEN}`)).not.toContain("SECRETPART");
+});
+// ── mention neutralisation (no room-wide ping)
+test("renderDigest neutralises @everyone/@here and <@id> in agent and summary", () => {
+  const out = renderDigest([s("canon", "active", "ping @everyone and <@123> and @here")]);
+  expect(out).not.toContain("@everyone and");   // @ is split by a zero-width space
+  expect(out.includes("@everyone")).toBe(false);
+});
+
+// ── control bytes never survive (the NUL-in-source root cause, at the data layer)
+test("a NUL or control byte in a summary is stripped before render", () => {
+  const out = renderDigest([s("canon", "active", "a" + String.fromCharCode(0) + "b" + String.fromCharCode(7) + "c")]);
+  expect(out).toContain("abc");
+  expect(out.includes(String.fromCharCode(0))).toBe(false);
+});
+
+// ── diff / coalesce / duplicates
+test("diffSnapshot coalesces a version bump that renders identically", () => {
+  const first = diffSnapshot([s("canon", "active", "on route", 1)], new Map());
+  expect(diffSnapshot([s("canon", "active", "on route", 99)], first.next).changed).toBe(false);
+});
+test("duplicate agent identities are rejected, not last-wins-swallowed", () => {
+  expect(() => diffSnapshot([s("canon", "active", "a"), s("canon", "idle", "b")], new Map())).toThrow("duplicate agent state");
+  expect(() => renderDigest([s("canon", "active", "a"), s("canon", "idle", "b")])).toThrow("duplicate agent state");
+});
+test("oversized agent list and whitespace agent names are rejected", () => {
+  const many = Array.from({ length: 65 }, (_, i) => s(`a${i}`, "idle", "x"));
+  expect(() => diffSnapshot(many, new Map())).toThrow("too many agents");
+  expect(() => renderDigest([s("bad name", "idle", "x")])).toThrow("invalid agent identity");
+});
+
+// ── persisted snapshot is a HASH, never plaintext summary (anvil P2 #1)
+test("FileMirrorStateStore persists a hash, and no plaintext summary reaches disk", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-hash-"));
+  const path = join(root, "mirror.json");
+  const mirror = new StateMirror(recordingSink().sink, new FileMirrorStateStore(path));
+  await mirror.reconcile([s("canon", "active", "deploying with MTIzNDU2.SECRETPART.ZZQ7aaaaaaaaaaaaaaaaaaaa")]);
+  const raw = require("node:fs").readFileSync(path, "utf8");
+  expect(raw).not.toContain("SECRETPART");
+  expect(raw).not.toContain("deploying");
+  expect(JSON.parse(raw).snapshot.canon).toMatch(/^[a-f0-9]{64}$/);   // sha256 hex
+});
+
+// ── post-once / edit-in-place / noop
+test("StateMirror posts once then edits; unchanged is noop; one post ever", async () => {
   const { calls, sink } = recordingSink();
-  const { store } = memStore();
-  const first = new StateMirror(sink, store);
-  expect(await first.reconcile([s("canon", "active", "a")])).toBe("posted");
-  // process dies and restarts: a brand-new mirror loads the persisted state
-  const restarted = new StateMirror(sink, store);
-  expect(await restarted.reconcile([s("canon", "active", "a")])).toBe("noop");        // identical → nothing
-  expect(await restarted.reconcile([s("canon", "done", "a")])).toBe("edited");         // change → edit, not post
-  expect(calls.filter(c => c.startsWith("post:")).length).toBe(1);                     // still exactly one post ever
+  const m = new StateMirror(sink);
+  expect(await m.reconcile([s("canon", "active", "a")])).toBe("posted");
+  expect(await m.reconcile([s("canon", "active", "a")])).toBe("noop");
+  expect(await m.reconcile([s("canon", "blocked", "a")])).toBe("edited");
+  expect(calls.filter(c => c.startsWith("post:")).length).toBe(1);
 });
-
-test("restart with an identical state emits nothing at all (no post, no edit)", async () => {
+test("reconcile([]) before anything is posted is a noop, not an empty post", async () => {
   const { calls, sink } = recordingSink();
+  expect(await new StateMirror(sink).reconcile([])).toBe("noop");
+  expect(calls.filter(c => c.startsWith("post:")).length).toBe(0);
+});
+
+// ── single visible sink, ZERO to #canon
+test("both channels configured: change posts to project ONLY, canon count stays 0", async () => {
+  const counts: Record<string, number> = { project: 0, canon: 0 };
+  const bucket = (ch: string) => (ch === "1056224550129508415" ? "project" : "canon");
+  const client = {
+    postMessage: async (ch: string) => { counts[bucket(ch)]++; return { messageId: "m1" }; },
+    editMessage: async (ch: string) => { counts[bucket(ch)]++; },
+    findMarkedMessage: async () => undefined,
+  };
+  const mirror = new StateMirror(new DiscordDigestSink(client, "1056224550129508415"));
+  await mirror.reconcile([s("canon", "active", "on route")]);
+  await mirror.reconcile([s("canon", "blocked", "waiting")]);
+  expect(counts.project).toBe(2); expect(counts.canon).toBe(0);
+});
+test("DiscordDigestSink rejects a non-snowflake channel", () => {
+  const client = { postMessage: async () => ({ messageId: "m" }), editMessage: async () => {}, findMarkedMessage: async () => undefined };
+  expect(() => new DiscordDigestSink(client, "broker-canary")).toThrow("digest channel invalid");
+});
+
+// ── crash between post and save ⇒ no second message (anvil P2 #2 / probe (ค))
+test("crash after post before save: restart recovers the message id and edits, never re-posts", async () => {
   const { store } = memStore();
-  await new StateMirror(sink, store).reconcile([s("a", "active", "1")]);
-  const after = calls.length;
-  await new StateMirror(sink, store).reconcile([s("a", "active", "1")]);
-  expect(calls.length).toBe(after);   // second process added nothing
+  // First mirror posts, then "crashes" before save by throwing in save.
+  const sink1 = recordingSink();
+  const failing: MirrorStateStore = { load: () => store.load(), save: () => { throw new Error("disk gone"); } };
+  const m1 = new StateMirror(sink1.sink, failing);
+  await expect(m1.reconcile([s("canon", "active", "a")])).rejects.toThrow("disk gone");
+  expect(sink1.calls.filter(c => c.startsWith("post:")).length).toBe(1);   // Discord DOES have the message now
+  // Restart: store is empty (save never ran), but the room has the message. recover() finds it.
+  const sink2 = recordingSink("1000000000000000001");   // room already holds msg-1
+  const m2 = new StateMirror(sink2.sink, store);
+  expect(await m2.reconcile([s("canon", "active", "a")])).toBe("edited");   // recovered → edit, not a 2nd post
+  expect(sink2.calls.filter(c => c.startsWith("post:")).length).toBe(0);
 });
 
-// ── FileMirrorStateStore: 0600/dir-0700, symlink+shape fail-closed, atomic round-trip
-import { FileMirrorStateStore } from "../src/state-mirror";
-import { mkdtempSync, writeFileSync as wf, symlinkSync, statSync, chmodSync as chm } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+// ── concurrent reconcile is single-flight (anvil P2 #3)
+test("two concurrent reconciles on a fresh mirror produce exactly ONE post", async () => {
+  let posts = 0;
+  const slow: DigestSink = {
+    post: async () => { posts++; await new Promise(r => setTimeout(r, 20)); return { messageId: "m1" }; },
+    edit: async () => {},
+    recover: async () => undefined,
+  };
+  const m = new StateMirror(slow);
+  await Promise.all([m.reconcile([s("canon", "active", "a")]), m.reconcile([s("canon", "active", "a")])]);
+  expect(posts).toBe(1);
+});
 
-test("FileMirrorStateStore round-trips and writes 0600 file under a 0700 dir", () => {
-  const root = mkdtempSync(join(tmpdir(), "maw-mirror-"));
-  const store = new FileMirrorStateStore(join(root, "state", "mirror.json"));
-  expect(store.load()).toBeUndefined();
-  store.save({ messageId: "msg-9", snapshot: { canon: "canon active x" } });
-  expect(store.load()).toEqual({ messageId: "msg-9", snapshot: { canon: "canon active x" } });
-  expect(statSync(join(root, "state", "mirror.json")).mode & 0o777).toBe(0o600);
-  expect(statSync(join(root, "state")).mode & 0o777).toBe(0o700);
-});
-test("FileMirrorStateStore rejects a wrong-mode file (tamper), fails closed", () => {
-  const root = mkdtempSync(join(tmpdir(), "maw-mirror-mode-"));
-  const store = new FileMirrorStateStore(join(root, "mirror.json"));
-  store.save({ messageId: "m", snapshot: {} });
-  chm(join(root, "mirror.json"), 0o644);
-  expect(() => store.load()).toThrow("mirror state corrupt");
-});
-test("FileMirrorStateStore rejects a symlinked state file", () => {
-  const root = mkdtempSync(join(tmpdir(), "maw-mirror-sym-"));
-  const target = join(root, "real.json"); wf(target, JSON.stringify({ messageId: "m", snapshot: {} }), { mode: 0o600 });
-  const link = join(root, "mirror.json"); symlinkSync(target, link);
-  expect(() => new FileMirrorStateStore(link)).toThrow("mirror state corrupt");
-});
-test("FileMirrorStateStore rejects tampered shape (non-string fingerprint, missing id)", () => {
-  const root = mkdtempSync(join(tmpdir(), "maw-mirror-shape-"));
-  const p = join(root, "mirror.json");
-  const store = new FileMirrorStateStore(p);
-  wf(p, JSON.stringify({ messageId: "m", snapshot: { canon: 42 } }), { mode: 0o600 });
-  expect(() => store.load()).toThrow("mirror state corrupt");
-  wf(p, JSON.stringify({ snapshot: {} }), { mode: 0o600 });
-  expect(() => store.load()).toThrow("mirror state corrupt");
-});
+// ── restart via FILE store edits, never re-posts
 test("StateMirror across restart via FILE store edits, never re-posts", async () => {
   const root = mkdtempSync(join(tmpdir(), "maw-mirror-restart-"));
   const path = join(root, "mirror.json");
-  const { calls, sink } = recordingSink();
-  const m1 = new StateMirror(sink, new FileMirrorStateStore(path));
+  const sink1 = recordingSink();
+  const m1 = new StateMirror(sink1.sink, new FileMirrorStateStore(path));
   expect(await m1.reconcile([s("canon", "active", "a")])).toBe("posted");
-  const m2 = new StateMirror(sink, new FileMirrorStateStore(path));   // restart: reload from disk
+  const sink2 = recordingSink("1000000000000000001");
+  const m2 = new StateMirror(sink2.sink, new FileMirrorStateStore(path));
   expect(await m2.reconcile([s("canon", "done", "a")])).toBe("edited");
-  expect(calls.filter(c => c.startsWith("post:")).length).toBe(1);
+  expect(sink2.calls.filter(c => c.startsWith("post:")).length).toBe(0);
+});
+
+// ── FileMirrorStateStore safety matrix
+test("FileMirrorStateStore round-trips 0600 file under 0700 dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-"));
+  const store = new FileMirrorStateStore(join(root, "state", "mirror.json"));
+  expect(store.load()).toBeUndefined();
+  store.save({ messageId: "1056224550129508415", snapshot: { canon: "abc" } });
+  expect(store.load()).toEqual({ messageId: "1056224550129508415", snapshot: { canon: "abc" } });
+  expect(statSync(join(root, "state", "mirror.json")).mode & 0o777).toBe(0o600);
+  expect(statSync(join(root, "state")).mode & 0o777).toBe(0o700);
+});
+test("FileMirrorStateStore fails closed on wrong mode, symlink, bad shape, bad JSON, empty", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-mirror-bad-"));
+  const p = join(root, "mirror.json");
+  const store = new FileMirrorStateStore(p);
+  store.save({ messageId: "1056224550129508415", snapshot: {} });
+  chm(p, 0o644); expect(() => store.load()).toThrow("mirror state corrupt"); chm(p, 0o600);
+  wf(p, JSON.stringify({ messageId: "not-a-snowflake", snapshot: {} }), { mode: 0o600 });
+  expect(() => store.load()).toThrow("mirror state corrupt");
+  wf(p, JSON.stringify({ messageId: "1056224550129508415", snapshot: { canon: 42 } }), { mode: 0o600 });
+  expect(() => store.load()).toThrow("mirror state corrupt");
+  wf(p, "{not json", { mode: 0o600 });
+  expect(() => store.load()).toThrow("mirror state corrupt");   // named, not raw SyntaxError (probe 5b)
+  wf(p, "", { mode: 0o600 });
+  expect(() => store.load()).toThrow("mirror state corrupt");
+  const link = join(root, "link.json"); const real = join(root, "real.json");
+  wf(real, JSON.stringify({ messageId: "1056224550129508415", snapshot: {} }), { mode: 0o600 }); symlinkSync(real, link);
+  expect(() => new FileMirrorStateStore(link)).toThrow("mirror state corrupt");
+});
+
+// ── marker-based recovery via the REST client: match by marker, reject ambiguity (anvil)
+import { DiscordRestClient } from "../src/runner";
+test("findMarkedMessage matches only the marked digest, ignoring the bot's other messages", async () => {
+  const rows = [
+    { id: "111", content: "just a normal canon reply" },
+    { id: "222", content: "🟢 **canon** — on route\n" + MIRROR_MARKER },
+    { id: "333", content: "another unrelated message" },
+  ];
+  const client = new DiscordRestClient("T", async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => rows }));
+  expect(await client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).toEqual({ messageId: "222" });
+});
+test("findMarkedMessage throws on >1 marked message (ambiguous), never silently adopts one", async () => {
+  const rows = [
+    { id: "222", content: "a\n" + MIRROR_MARKER },
+    { id: "444", content: "b\n" + MIRROR_MARKER },
+  ];
+  const client = new DiscordRestClient("T", async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => rows }));
+  await expect(client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).rejects.toThrow("ambiguous mirror messages");
+});
+test("findMarkedMessage returns undefined when no marked message exists (fresh channel)", async () => {
+  const client = new DiscordRestClient("T", async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => [{ id: "1", content: "hi" }] }));
+  expect(await client.findMarkedMessage("1056224550129508415", MIRROR_MARKER)).toBeUndefined();
 });

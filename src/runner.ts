@@ -25,13 +25,22 @@ export class DiscordRestClient implements DiscordClient {
       await this.sleep(response.status === 429 ? retryAfterMs(response.headers, attempt) : policy.delayMs ?? retryAfterMs(response.headers, attempt));
     }
   }
+  /** Find the single recent message whose content carries `marker` (state-mirror crash
+   *  recovery). Matching by marker, not by author, is deliberate: the bot posts unrelated
+   *  messages, so "latest by this bot" would adopt the wrong one. Throws on >1 (ambiguous). */
+  async findMarkedMessage(channelId: string, marker: string): Promise<{ messageId: string } | undefined> {
+    const rows = await this.getMessages(channelId, undefined, 50) as Array<{ id?: unknown; content?: unknown }>;
+    const matches = rows.filter(r => typeof r?.content === "string" && r.content.includes(marker) && typeof r.id === "string");
+    if (matches.length > 1) throw new Error("ambiguous mirror messages");
+    return matches.length === 1 ? { messageId: matches[0]!.id as string } : undefined;
+  }
   /** POST a plain message to a channel; returns the created message id. Used by the state
    *  mirror (outbound digest), never by the command path. */
   async postMessage(channelId: string, content: string): Promise<{ messageId: string }> {
     const url = `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`;
     for (let attempt = 0;; attempt++) {
       let response: FetchResponse;
-      try { response = await this.fetcher(url, { method: "POST", headers: { Authorization: `Bot ${this.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ content }) } ); } catch { throw new Error("Discord REST request failed"); }
+      try { response = await this.fetcher(url, { method: "POST", headers: { Authorization: `Bot ${this.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ content, allowed_mentions: { parse: [] } }) } ); } catch { throw new Error("Discord REST request failed"); }
       if (response.ok) { const body = await response.json() as { id?: unknown }; if (typeof body?.id !== "string") throw new Error("Discord REST response invalid"); return { messageId: body.id }; }
       const policy = retryDecision(response.status, attempt);
       if (!policy.retry) throw new Error("Discord REST request held");
@@ -43,7 +52,7 @@ export class DiscordRestClient implements DiscordClient {
     const url = `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`;
     for (let attempt = 0;; attempt++) {
       let response: FetchResponse;
-      try { response = await this.fetcher(url, { method: "PATCH", headers: { Authorization: `Bot ${this.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ content }) } ); } catch { throw new Error("Discord REST request failed"); }
+      try { response = await this.fetcher(url, { method: "PATCH", headers: { Authorization: `Bot ${this.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ content, allowed_mentions: { parse: [] } }) } ); } catch { throw new Error("Discord REST request failed"); }
       if (response.ok) return;
       const policy = retryDecision(response.status, attempt);
       if (!policy.retry) throw new Error("Discord REST request held");
