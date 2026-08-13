@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startFinalEventServer } from "../src/final-event-server";
-import { ACCEPTED_KIND, ALLOWED_ROUTE, SCHEMA, InMemoryFinalEventStore, FileFinalEventStore, computeContentDigest, type FinalEventSecrets } from "../src/final-event-contract";
+import { ACCEPTED_KIND, ALLOWED_ROUTE, CONTENT_EVENT_TYPE, CONTENT_SOURCE, IDEMPOTENCY_KEY_PREFIX, SCHEMA, InMemoryFinalEventStore, FileFinalEventStore, computeContentDigest, type FinalEventSecrets, type LiveSiangFinalEventContent } from "../src/final-event-contract";
 
 /** Real local HTTP (Bun.serve + fetch), fully in-memory store — no Discord, no bridge, no live
  *  config anywhere in this file, matching the owner's "local in-memory HTTP only" scope. Every
@@ -12,9 +12,15 @@ const servers: Array<{ stop(): void }> = [];
 afterEach(() => { while (servers.length) servers.pop()!.stop(); });
 
 const SECRETS: FinalEventSecrets = { authorizedToken: "receipt-secret-xyz" };
-const content = { turnId: "t1", text: "hello" };
+const EVENT_ID = "evt-1";
+const content: LiveSiangFinalEventContent = {
+  conversation_id: "conv-1", event_id: EVENT_ID, event_type: CONTENT_EVENT_TYPE,
+  final_text: "hello", locale: "en-US", occurred_at: "2026-08-14T01:50:00.000Z",
+  schema: SCHEMA, source: CONTENT_SOURCE, turn_id: "turn-1",
+};
 const digest = computeContentDigest(content);
-const goodBody = (overrides: Record<string, unknown> = {}) => ({ schema: SCHEMA, route: ALLOWED_ROUTE, kind: ACCEPTED_KIND, eventId: "evt-1", idempotencyKey: "idem-1", contentDigest: digest, content, ...overrides });
+const IDEM_KEY = IDEMPOTENCY_KEY_PREFIX + EVENT_ID;
+const goodBody = (overrides: Record<string, unknown> = {}) => ({ schema: SCHEMA, route: ALLOWED_ROUTE, kind: ACCEPTED_KIND, eventId: EVENT_ID, idempotencyKey: IDEM_KEY, contentDigest: digest, content, ...overrides });
 
 async function post(port: number, body: unknown, token = SECRETS.authorizedToken) {
   return fetch(`http://127.0.0.1:${port}/final-event`, {
@@ -46,7 +52,8 @@ describe("final-event-server — real local HTTP round trip", () => {
     const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
     servers.push(server);
     await post(port, goodBody());
-    const conflicting = await post(port, goodBody({ contentDigest: computeContentDigest({ turnId: "t1", text: "DIFFERENT" }), content: { turnId: "t1", text: "DIFFERENT" } }));
+    const differentContent: LiveSiangFinalEventContent = { ...content, final_text: "DIFFERENT TEXT ENTIRELY" };
+    const conflicting = await post(port, goodBody({ contentDigest: computeContentDigest(differentContent), content: differentContent }));
     expect(conflicting.status).toBe(409);
     const json = await conflicting.json();
     expect(json.error).toBe("IDEMPOTENCY_CONFLICT");

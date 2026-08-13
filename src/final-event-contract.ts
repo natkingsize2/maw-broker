@@ -9,6 +9,13 @@
  * explicit constraints, not matched against a pre-existing spec. Full shape recorded in
  * `SPEC-final-event-receipt-v1.md` alongside this file.
  *
+ * ALIGNED 2026-08-14 02:18: owner specified `content`'s exact key set (see
+ * `LiveSiangFinalEventContent` below) plus two cross-field rules (eventId ==
+ * content.event_id; idempotencyKey == a fixed prefix + eventId) — a Python builder will
+ * implement a mapping against this file's committed test vector
+ * (`test/fixtures/final-event-vector-v1.json`), so the canonicalization/digest algorithm is
+ * documented precisely enough for byte-identical cross-language reproduction.
+ *
  * Deliberately standalone: imports NOTHING from `runner.ts`/`bridge-server.ts`/
  * `bridge-client.ts` — no Discord credential, no broker daemon, no live config anywhere in this
  * module's reachable graph (owner: "Do not use real token Discord broker daemon or live
@@ -47,8 +54,45 @@ export const ALLOWED_ROUTE = "maw-pipecat";
 export const REJECTED_KINDS = ["raw_audio", "partial", "assistant_tts"] as const;
 export const ACCEPTED_KIND = "final";
 
+/**
+ * Content literals — owner (2026-08-14 02:18): "define content exactly as the liveSiang v1
+ * final event object: conversation_id event_id event_type final_text locale occurred_at schema
+ * source turn_id... reject... wrong event_type/source." The owner gave the KEY NAMES but not the
+ * required literal VALUES for `event_type`/`source`/`schema` (a nested schema tag inside
+ * content, distinct from the envelope's own `schema` field). No prior liveSiang schema exists to
+ * read these from (confirmed absent, see file header) — the three constants below are therefore
+ * DEFINED here, not matched: `event_type` mirrors the envelope's `kind: "final"`, `source` uses
+ * the exact route name the owner already gave verbatim ("maw-pipecat"), `content.schema` reuses
+ * the one schema identifier the owner did give. **Flagged explicitly to the owner/builder as
+ * decisions requiring confirmation, not facts** — see SPEC-final-event-receipt-v1.md.
+ */
+export const CONTENT_EVENT_TYPE = "final";
+export const CONTENT_SOURCE = "maw-pipecat";
+/** idempotencyKey formula, owner's literal wording: "livesiang-final-v1 plus eventId" — direct
+ *  string concatenation, NO separator (none was specified; inventing one would be an unrequested
+ *  design choice). `idem-1` → `"livesiang-final-v1idem-1"`, exactly. */
+export const IDEMPOTENCY_KEY_PREFIX = "livesiang-final-v1";
+
+export type LiveSiangFinalEventContent = {
+  conversation_id: string;
+  event_id: string;
+  event_type: string;
+  final_text: string;
+  locale: string;
+  occurred_at: string;
+  schema: string;
+  source: string;
+  turn_id: string;
+};
+/** Exact, closed key set — order-independent (checked as a sorted-array equality), and no key
+ *  may be missing OR extra. An event carrying any additional key (e.g. a raw-audio byte buffer
+ *  smuggled alongside a well-formed final_text) is rejected outright, not stripped-and-accepted. */
+const CONTENT_REQUIRED_KEYS = ["conversation_id", "event_id", "event_type", "final_text", "locale", "occurred_at", "schema", "source", "turn_id"] as const;
+const OCCURRED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const FINAL_TEXT_LIMIT = 4000; // a completed turn's transcript, not an identifier — larger bound than eventId/idempotencyKey
+
 export class FinalEventError extends Error {
-  constructor(readonly code: "UNAUTHORIZED" | "MALFORMED_BODY" | "UNKNOWN_ROUTE" | "KIND_REJECTED" | "DIGEST_MISMATCH" | "IDEMPOTENCY_CONFLICT", message: string) {
+  constructor(readonly code: "UNAUTHORIZED" | "MALFORMED_BODY" | "UNKNOWN_ROUTE" | "KIND_REJECTED" | "DIGEST_MISMATCH" | "CONTENT_REJECTED" | "EVENT_ID_MISMATCH" | "IDEMPOTENCY_KEY_FORMAT" | "IDEMPOTENCY_CONFLICT", message: string) {
     super(message); this.name = "FinalEventError";
   }
 }
@@ -60,7 +104,7 @@ export type FinalEventRequest = {
   eventId: string;
   idempotencyKey: string;
   contentDigest: string;
-  content: unknown;
+  content: LiveSiangFinalEventContent;
 };
 
 export type FinalEventReceipt = {
@@ -91,9 +135,38 @@ export function computeContentDigest(content: unknown): string {
 
 function isNonEmptyBoundedString(v: unknown): v is string { return typeof v === "string" && v.length > 0 && v.length <= NONEMPTY_STRING_LIMIT; }
 
-/** Validates shape/route/kind/digest-integrity — auth is checked by the caller BEFORE this runs
- *  (see `handleFinalEvent`), so a malformed body from an unauthenticated caller never gets this
- *  far, keeping the auth boundary the very first gate always. */
+function isNonEmptyBoundedField(v: unknown, limit: number): v is string { return typeof v === "string" && v.length > 0 && v.length <= limit; }
+
+/** Validates the content object's OWN shape/literals — called only after the envelope's digest
+ *  has already been confirmed to match (see `validateFinalEventRequest`), so a structurally
+ *  invalid content object is reported distinctly from a merely-tampered one. */
+function validateContent(content: unknown): LiveSiangFinalEventContent {
+  if (!content || typeof content !== "object" || Array.isArray(content)) throw new FinalEventError("CONTENT_REJECTED", "content must be a JSON object");
+  const c = content as Record<string, unknown>;
+  const actualKeys = Object.keys(c).sort();
+  const expectedKeys = [...CONTENT_REQUIRED_KEYS].sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((k, i) => k !== expectedKeys[i])) {
+    const missing = expectedKeys.filter(k => !actualKeys.includes(k));
+    const unknown = actualKeys.filter(k => !expectedKeys.includes(k as typeof CONTENT_REQUIRED_KEYS[number]));
+    throw new FinalEventError("CONTENT_REJECTED", `content key set invalid — missing: [${missing.join(",")}] unknown: [${unknown.join(",")}]`);
+  }
+  for (const key of ["conversation_id", "event_id", "locale", "turn_id"] as const) {
+    if (!isNonEmptyBoundedField(c[key], NONEMPTY_STRING_LIMIT)) throw new FinalEventError("CONTENT_REJECTED", `content.${key} missing or invalid`);
+  }
+  if (!isNonEmptyBoundedField(c.final_text, FINAL_TEXT_LIMIT)) throw new FinalEventError("CONTENT_REJECTED", "content.final_text missing or invalid");
+  if (typeof c.occurred_at !== "string" || !OCCURRED_AT_RE.test(c.occurred_at)) throw new FinalEventError("CONTENT_REJECTED", "content.occurred_at must be an ISO8601 UTC timestamp");
+  if (c.event_type !== CONTENT_EVENT_TYPE) throw new FinalEventError("CONTENT_REJECTED", `content.event_type "${c.event_type}" rejected — only "${CONTENT_EVENT_TYPE}" is accepted`);
+  if (c.source !== CONTENT_SOURCE) throw new FinalEventError("CONTENT_REJECTED", `content.source "${c.source}" rejected — only "${CONTENT_SOURCE}" is accepted`);
+  if (c.schema !== SCHEMA) throw new FinalEventError("CONTENT_REJECTED", `content.schema must be exactly "${SCHEMA}"`);
+  return c as unknown as LiveSiangFinalEventContent;
+}
+
+/** Validates envelope shape/route/kind/digest-integrity, then the content object's own strict
+ *  shape, then the two cross-field rules the owner added 2026-08-14 02:18 (eventId must equal
+ *  content.event_id; idempotencyKey must equal the fixed prefix + eventId). Auth is checked by
+ *  the caller BEFORE this runs (see `handleFinalEvent`), so a malformed body from an
+ *  unauthenticated caller never gets this far, keeping the auth boundary the very first gate
+ *  always. */
 export function validateFinalEventRequest(body: unknown): FinalEventRequest {
   const b = body as Partial<FinalEventRequest> | null | undefined;
   if (!b || typeof b !== "object") throw new FinalEventError("MALFORMED_BODY", "body must be a JSON object");
@@ -117,7 +190,13 @@ export function validateFinalEventRequest(body: unknown): FinalEventRequest {
   const actualDigest = computeContentDigest(b.content);
   if (actualDigest !== b.contentDigest) throw new FinalEventError("DIGEST_MISMATCH", "contentDigest does not match sha256 of content");
 
-  return { schema: b.schema, route: b.route, kind: b.kind, eventId: b.eventId, idempotencyKey: b.idempotencyKey, contentDigest: b.contentDigest, content: b.content };
+  const content = validateContent(b.content);
+
+  if (b.eventId !== content.event_id) throw new FinalEventError("EVENT_ID_MISMATCH", "eventId must equal content.event_id");
+  const expectedIdempotencyKey = IDEMPOTENCY_KEY_PREFIX + b.eventId;
+  if (b.idempotencyKey !== expectedIdempotencyKey) throw new FinalEventError("IDEMPOTENCY_KEY_FORMAT", `idempotencyKey must equal "${IDEMPOTENCY_KEY_PREFIX}" + eventId (expected "${expectedIdempotencyKey}")`);
+
+  return { schema: b.schema, route: b.route, kind: b.kind, eventId: b.eventId, idempotencyKey: b.idempotencyKey, contentDigest: b.contentDigest, content };
 }
 
 // ── durable idempotency store — same filesystem-safety idiom as FileMirrorStateStore/DurableCursor
