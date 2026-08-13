@@ -69,3 +69,20 @@ loopback-bind `/api/requests`), not in this broker.
 - Upstream issue (maw hey/capture same-channel echo + unauthenticated reply): https://github.com/natkingsize2/maw-js-mirror/issues/14 (owner mirror; escalate upstream at owner discretion).
 - G6 residual HOLD: reaction live ordering (👀→✅) and idempotency across restart are proven at
   the unit level only; live Discord ordering not yet exercised.
+
+## Owner requirement 2026-08-13 15:2x — broker as agent-state MIRROR (new direction)
+Given live by Nat in #canon (`1537375...`): *"พวก command ไม่ต้องส่งเข้ามา ไม่ได้สนใจ · สนใจแค่
+state สรุปของทุก agent เข้าห้องโปรเจคผ่าน broker"* — the project room must NOT carry raw
+approve/reject commands or agent chatter. What Nat wants in it: a **one-line-per-agent summary
+of every agent's state** (active / blocked / done, what it's on), aggregated and posted/updated
+through the broker into the project room.
+
+This is a distinct capability from the approve/reject command gate already built:
+- Source of truth already exists — `argus` telemetry (ctx, rate) + `maw team`/task phase state.
+- Broker becomes a **state mirror**: collect per-agent state → render one digest line each →
+  post/update in the project room on change (or on interval — pending owner choice).
+- No commands, no plaintext, no per-message plumbing surfaces in the room.
+- Same house invariants: no secrets/content in the post; owner-only room; reversible.
+
+Status: requirement captured; not yet built. Sequenced after the reviewed route (probe GO
+@ 468c9b7). Update cadence (on-change vs interval) awaiting owner reply.
