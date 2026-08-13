@@ -70,6 +70,18 @@ export function sanitizeSummary(summary: string): string {
   return oneLine.length > SUMMARY_CAP ? oneLine.slice(0, SUMMARY_CAP - 1) + "…" : oneLine;
 }
 
+/** Multi-line variant for phase-4 summary-back: identical strip/redact/mention rules, but
+ *  newlines survive (a summary post is prose, not a label) and the cap is the caller's. */
+export function sanitizeBlock(text: string, cap: number): string {
+  if (!Number.isInteger(cap) || cap < 1) throw new Error("invalid sanitize cap");
+  const cleaned = neutralizeMentions(redactSecrets(text.replace(CONTROL_CHARS, "")))
+    .replace(/[ \t]+/g, " ")
+    .replace(/ ?\n ?/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return cleaned.length > cap ? cleaned.slice(0, cap - 1) + "…" : cleaned;
+}
+
 const VALID_PHASES: ReadonlySet<string> = new Set(["active", "blocked", "done", "idle", "offline"]);
 const DISCORD_CONTENT_LIMIT = 2000;
 
