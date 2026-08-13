@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, unlinkSync, linkSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync, unlinkSync, linkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,3 +44,4 @@ test("malformed poll row is isolated while valid rows continue", async () => { c
 test("audit capacity is a named hard stop", () => { const f=fixture(); for(let i=0;i<DurableStore.MAX_AUDIT_RECORDS;i++) f.store.audit({at:new Date().toISOString(),event:"error",reason:"x"}); expect(()=>f.store.audit({at:new Date().toISOString(),event:"error",reason:"overflow"})).toThrow("audit capacity exceeded"); });
 test("Retry-After is honored and capped", () => { expect(retryAfterMs(new Headers({"retry-after":"2.5"}),0)).toBe(2500); expect(retryAfterMs(new Headers({"retry-after":"999"}),0)).toBe(60000); expect(retryAfterMs(new Headers(),5)).toBe(32000); });
 test("owner config is validated", () => { expect(validatedOwnerId("358970717125214209")).toBe(NAT_USER_ID); expect(()=>validatedOwnerId("canon")).toThrow("owner id config invalid"); expect(()=>validatedOwnerId(undefined)).toThrow("owner id config invalid"); });
+test("store root is enforced at mode 0700", () => { const root=mkdtempSync(join(tmpdir(),"maw-broker-mode-")); chmodSync(root,0o755); new DurableStore(root); expect(statSync(root).mode & 0o777).toBe(0o700); });

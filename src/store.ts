@@ -10,7 +10,7 @@ export class DurableStore {
   private states: Map<string, "pending"|"resolved">;
 
   constructor(root: string) {
-    if (root.includes("..")) throw new Error("invalid store path"); if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new Error("store path must not be symlink"); mkdirSync(root, { recursive: true });
+    if (root.includes("..")) throw new Error("invalid store path"); if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new Error("store path must not be symlink"); mkdirSync(root, { recursive: true, mode: 0o700 }); chmodSync(root, 0o700);
     this.auditPath = join(root, "audit.jsonl");
     this.statePath = join(root, "resolved.json");
     for (const p of [this.auditPath,this.statePath]) if (existsSync(p)) { const st=lstatSync(p); if(st.isSymbolicLink()||!st.isFile()) throw new Error(`unsafe store file: ${p}`); const fd=openSync(p, constants.O_RDONLY|((constants as any).O_NOFOLLOW??0)); closeSync(fd); }
