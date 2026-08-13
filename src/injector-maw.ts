@@ -13,38 +13,61 @@ export const execFileRunner: CommandRunner = (argv, timeoutMs) =>
     });
   });
 
+/** Minimal JSON-over-HTTP surface, injectable for tests. */
+export type HttpJson = (method: "GET" | "POST", url: string, body?: unknown) => Promise<{ ok: boolean; json: unknown }>;
+export const fetchJson: HttpJson = async (method, url, body) => {
+  const response = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  let parsed: unknown = undefined;
+  try { parsed = await response.json(); } catch { /* body shape is validated by the caller */ }
+  return { ok: response.ok, json: parsed };
+};
+
 export type InjectorTimings = { attempts: number; delayMs: number; sendTimeoutMs: number };
 const DEFAULT_TIMINGS: InjectorTimings = { attempts: 6, delayMs: 2_000, sendTimeoutMs: 30_000 };
 
 /**
- * Real downstream injector: dispatches the approved plaintext to the agent that owns the
- * route (channel), then requires RECEIVER-SIDE evidence — the marker must be visible in the
- * target's pane (`maw capture`/`maw peek`) — before returning the Ack. Send rc/status alone
- * never resolves a record (SPEC constraint E); missing evidence throws, the record stays
- * pending, and the cursor holds via the existing INJECTOR_FAILURE path.
+ * Real downstream injector with RECEIVER-PRODUCED evidence (SPEC constraint E, tightened per
+ * probe G6 finding 2026-08-13: pane capture is an echo of the send itself — `maw hey` types
+ * into the target pane and `maw capture` reads that same pane, so a dead or hung agent still
+ * "shows" the marker, and anyone in the Discord room can pre-plant a snowflake-derived marker).
  *
- * Idempotency: the broker dedupes by messageId before this runs (begin()/resolved), and the
- * marker carries the messageId so a replayed dispatch is visibly the same command.
+ * Evidence here is the maw request-reply protocol instead:
+ *   1. POST /api/request mints a server-side correlationId (never visible in the room).
+ *   2. `maw hey` delivers the command + correlationId + reply instruction into the agent pane
+ *      (send rc gates dispatch only — it is never treated as receipt).
+ *   3. The Ack is returned ONLY when GET /api/request/<id> reports status "replied" — a state
+ *      transition only the receiver's own `maw reply <id>` invocation can produce.
+ * No reply within the window ⇒ throw ⇒ record stays pending and the cursor holds
+ * (existing INJECTOR_FAILURE path); the runner retries on a later poll.
+ *
+ * Idempotency: the broker dedupes by messageId before this runs, and every retry carries the
+ * same [broker#messageId] tag so the receiver can recognise duplicates of the same command.
  */
 export function createMawInjector(
   agentForRoute: (route: string) => string | undefined,
   run: CommandRunner = execFileRunner,
   timings: InjectorTimings = DEFAULT_TIMINGS,
   sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  http: HttpJson = fetchJson,
+  mawUrl: string = `http://localhost:${process.env.MAW_PORT || "3456"}`,
 ): DownstreamInjector {
   return async (plaintext: string, messageId: string, route: string): Promise<Ack> => {
     const agent = agentForRoute(route);
     if (!agent) throw new Error("no agent registered for route");
-    const marker = `[broker#${messageId}]`;
-    const send = await run(["maw", "hey", agent, `${marker} ${plaintext}`], timings.sendTimeoutMs);
+
+    const minted = await http("POST", `${mawUrl}/api/request`, { to: agent, from: "maw-broker", message: `[broker#${messageId}] ${plaintext}` });
+    const correlationId = (minted.json as { correlationId?: unknown } | undefined)?.correlationId;
+    if (!minted.ok || typeof correlationId !== "string" || !correlationId) throw new Error("dispatch failed");
+
+    const send = await run(["maw", "hey", agent, `[broker#${messageId}][request:${correlationId}] ${plaintext} — ยืนยันรับด้วย: maw reply ${correlationId} ok`], timings.sendTimeoutMs);
     if (send.rc !== 0) throw new Error("dispatch failed");
+
     for (let attempt = 0; attempt < timings.attempts; attempt++) {
-      for (const verb of [["maw", "capture", agent, "--full"], ["maw", "peek", agent]]) {
-        const seen = await run(verb, timings.sendTimeoutMs);
-        if (seen.rc === 0 && seen.stdout.includes(marker)) return { messageId, route, accepted: true };
-      }
+      const polled = await http("GET", `${mawUrl}/api/request/${correlationId}`);
+      const status = (polled.json as { status?: unknown } | undefined)?.status;
+      if (polled.ok && status === "replied") return { messageId, route, accepted: true };
       await sleep(timings.delayMs);
     }
-    throw new Error("no receiver-side evidence of dispatch");
+    throw new Error("no receiver reply");
   };
 }

@@ -131,39 +131,58 @@ test("REST react holds 401 without retry", async () => {
   expect(calls).toBe(1);
 });
 
-// ── Real injector: receiver-side evidence required (constraint E)
+// ── Real injector: RECEIVER-PRODUCED evidence via request-reply (constraint E, probe G6 rework)
+import type { HttpJson } from "../src/injector-maw";
 const fakeRun = (script: Record<string, { rc: number; stdout: string }[]>): CommandRunner => async argv => {
   const verb = argv.slice(0, 2).join(" ");
   const queue = script[verb];
   if (!queue || queue.length === 0) return { rc: 1, stdout: "" };
   return queue.length === 1 ? queue[0]! : queue.shift()!;
 };
+const fakeHttp = (mint: { ok: boolean; json: unknown }, polls: { ok: boolean; json: unknown }[]): HttpJson => async (method) =>
+  method === "POST" ? mint : (polls.length === 1 ? polls[0]! : polls.shift()!);
 const registry = new RouteRegistry([route]);
 const agentFor = (destination: string) => registry.get(destination)?.agent;
 const instant = async () => {};
+const T = { attempts: 3, delayMs: 0, sendTimeoutMs: 100 };
+const heyOk = { "maw hey": [{ rc: 0, stdout: "delivered" }] };
 
-test("injector acks only after the marker is visible receiver-side", async () => {
-  const inject = createMawInjector(agentFor, fakeRun({ "maw hey": [{ rc: 0, stdout: "delivered" }], "maw capture": [{ rc: 0, stdout: "…[broker#42] approve…" }] }), { attempts: 2, delayMs: 0, sendTimeoutMs: 100 }, instant);
+test("injector acks only after the receiver's own reply flips status to replied", async () => {
+  const http = fakeHttp({ ok: true, json: { correlationId: "req-1-x" } }, [{ ok: true, json: { status: "delivered" } }, { ok: true, json: { status: "replied" } }]);
+  const inject = createMawInjector(agentFor, fakeRun(heyOk), T, instant, http, "http://test");
   expect(await inject("approve", "42", "thread-1")).toEqual({ messageId: "42", route: "thread-1", accepted: true });
 });
-test("injector refuses ack when send succeeds but no receiver evidence appears", async () => {
-  const inject = createMawInjector(agentFor, fakeRun({ "maw hey": [{ rc: 0, stdout: "delivered" }], "maw capture": [{ rc: 0, stdout: "nothing here" }], "maw peek": [{ rc: 0, stdout: "nothing here" }] }), { attempts: 2, delayMs: 0, sendTimeoutMs: 100 }, instant);
-  await expect(inject("approve", "42", "thread-1")).rejects.toThrow("no receiver-side evidence");
+test("injector refuses ack while status never reaches replied — delivered pane echo is not receipt", async () => {
+  const http = fakeHttp({ ok: true, json: { correlationId: "req-1-x" } }, [{ ok: true, json: { status: "delivered" } }]);
+  const inject = createMawInjector(agentFor, fakeRun(heyOk), T, instant, http, "http://test");
+  await expect(inject("approve", "42", "thread-1")).rejects.toThrow("no receiver reply");
 });
-test("injector fails on nonzero send rc", async () => {
-  const inject = createMawInjector(agentFor, fakeRun({ "maw hey": [{ rc: 1, stdout: "" }] }), { attempts: 1, delayMs: 0, sendTimeoutMs: 100 }, instant);
+test("injector fails when correlation id cannot be minted", async () => {
+  const http = fakeHttp({ ok: false, json: {} }, []);
+  const inject = createMawInjector(agentFor, fakeRun(heyOk), T, instant, http, "http://test");
+  await expect(inject("approve", "42", "thread-1")).rejects.toThrow("dispatch failed");
+});
+test("injector fails on nonzero send rc even with a minted correlation id", async () => {
+  const http = fakeHttp({ ok: true, json: { correlationId: "req-1-x" } }, [{ ok: true, json: { status: "replied" } }]);
+  const inject = createMawInjector(agentFor, fakeRun({ "maw hey": [{ rc: 1, stdout: "" }] }), T, instant, http, "http://test");
   await expect(inject("approve", "42", "thread-1")).rejects.toThrow("dispatch failed");
 });
 test("injector fails closed for a route with no registered agent", async () => {
-  const inject = createMawInjector(() => undefined, fakeRun({}), { attempts: 1, delayMs: 0, sendTimeoutMs: 100 }, instant);
+  const inject = createMawInjector(() => undefined, fakeRun({}), T, instant, fakeHttp({ ok: true, json: {} }, []), "http://test");
   await expect(inject("approve", "42", "thread-1")).rejects.toThrow("no agent registered");
 });
 test("injector failure keeps record pending and holds cursor end-to-end", async () => {
-  const failing = createMawInjector(agentFor, fakeRun({ "maw hey": [{ rc: 1, stdout: "" }] }), { attempts: 1, delayMs: 0, sendTimeoutMs: 100 }, instant);
+  const failing = createMawInjector(agentFor, fakeRun({ "maw hey": [{ rc: 1, stdout: "" }] }), T, instant, fakeHttp({ ok: true, json: { correlationId: "r" } }, []), "http://test");
   const f = fixture([row("100")], undefined, failing);
   expect(await f.run.runOnce()).toEqual({ processed: 0, held: true });
   expect(existsSync(join(f.root, "cursor.json"))).toBe(false);
   f.run.close();
+});
+test("routes file JSON parse failure raises the named error, not a raw SyntaxError", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-p2-badjson-"));
+  const path = join(root, "routes.json");
+  writeFileSync(path, "{secret-looking-content!!", { mode: 0o600 });
+  expect(() => loadRoutesFile(path)).toThrow("routes file invalid");
 });
 
 // ── Audit cap: rotation instead of wedge, chain continuity across files

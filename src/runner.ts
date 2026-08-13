@@ -91,6 +91,11 @@ export class PersistentLease {
         if (this.alive(owner.pid)) {
           // A live pid is only a live OWNER if its start time matches the lease. A recycled
           // pid (unrelated process) must not wedge startup forever; unknown start time fails closed.
+          // RECORDED TRADEOFF (probe G6): closing R2 makes the theft surface nonzero — a lease
+          // whose startedAt drifts >60s from the live process's real start AND whose heartbeat
+          // is stale can now be reclaimed. A real runner writes startedAt at construction
+          // (ms from its own start) and heartbeats every poll, so both conditions together
+          // mean the recorded owner is not the process wearing that pid.
           const started = this.startTimeOf(owner.pid);
           const pidReused = started !== undefined && Math.abs(started - owner.startedAt) > PersistentLease.START_TIME_TOLERANCE_MS;
           if (!pidReused) throw new Error("runner lease already held");

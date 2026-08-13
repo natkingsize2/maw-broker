@@ -15,7 +15,9 @@ import type { Route } from "./types";
 export function loadRoutesFile(path: string): Route[] {
   const state = lstatSync(path);
   if (!state.isFile() || state.isSymbolicLink() || (state.mode & 0o777) !== 0o600) throw new Error("routes file invalid");
-  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  // Named error only: a raw SyntaxError may echo file content into logs (constraint G).
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch { throw new Error("routes file invalid"); }
   if (!Array.isArray(parsed) || parsed.length !== 1) throw new Error("routes file must declare exactly one route in phase 2");
   const routes = parsed.map((row: unknown): Route => {
     const candidate = row as Partial<Route>;
