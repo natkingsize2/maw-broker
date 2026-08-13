@@ -57,14 +57,24 @@ export class MirrorService {
   close() { this.lease.release(); }
 }
 
-export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
-  const secrets = loadRunnerSecrets(env);
+/** Validate + hard-pin the mirror's config on the REAL startup path (probe P2: the channel pin
+ *  worked but nothing tested it was still CALLED — a refactor could drop it with every gate
+ *  green; 4th time this M5 pattern bit us). Extracted so a test pins the call site: removing the
+ *  channel check turns the assertMirrorConfig test red. */
+export function assertMirrorConfig(env: Record<string, string | undefined>): { channel: string; storeRoot: string; intervalMs: number; maxPolls: number } {
   const storeRoot = env.MAW_MIRROR_STORE_ROOT;
   const channel = env.MAW_MIRROR_CHANNEL_ID;
   if (!storeRoot) throw new Error("mirror service configuration invalid");
   if (channel !== MIRROR_CHANNEL_ID) throw new Error("mirror channel differs from production pin");
   const intervalMs = Number(env.MIRROR_POLL_INTERVAL_MS ?? "10000");
   const maxPolls = Number(env.MIRROR_MAX_POLLS ?? "120");
+  if (!Number.isInteger(intervalMs) || intervalMs < 1000 || !Number.isInteger(maxPolls) || maxPolls < 1) throw new Error("mirror service configuration invalid");
+  return { channel, storeRoot, intervalMs, maxPolls };
+}
+
+export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
+  const secrets = loadRunnerSecrets(env);
+  const { channel, storeRoot, intervalMs, maxPolls } = assertMirrorConfig(env);
   const client = new DiscordRestClient(secrets.discordBotToken);
   const source = await resolveStateSource(env);
   const service = new MirrorService({

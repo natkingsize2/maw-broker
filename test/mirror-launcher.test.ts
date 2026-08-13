@@ -61,3 +61,18 @@ test("MirrorService rejects a bad interval/poll configuration", () => {
 test("MIRROR_CHANNEL_ID is the pinned project room", () => {
   expect(MIRROR_CHANNEL_ID).toBe("1056224550129508415");
 });
+
+// ── M5 (probe P2): pin the channel-pin to the real config path, not just the value
+import { assertMirrorConfig } from "../src/mirror-launcher";
+const goodEnv = { MAW_MIRROR_STORE_ROOT: "/tmp/x", MAW_MIRROR_CHANNEL_ID: MIRROR_CHANNEL_ID, MIRROR_POLL_INTERVAL_MS: "10000", MIRROR_MAX_POLLS: "120" };
+test("assertMirrorConfig accepts the pinned project channel", () => {
+  expect(assertMirrorConfig(goodEnv)).toMatchObject({ channel: MIRROR_CHANNEL_ID, intervalMs: 10000, maxPolls: 120 });
+});
+test("assertMirrorConfig refuses a wrong channel on the real config path (M5 call-site pin)", () => {
+  expect(() => assertMirrorConfig({ ...goodEnv, MAW_MIRROR_CHANNEL_ID: "9999999999999999999" })).toThrow("differs from production pin");
+  expect(() => assertMirrorConfig({ ...goodEnv, MAW_MIRROR_CHANNEL_ID: undefined })).toThrow("differs from production pin");
+});
+test("assertMirrorConfig rejects missing store root and bad interval/poll", () => {
+  expect(() => assertMirrorConfig({ ...goodEnv, MAW_MIRROR_STORE_ROOT: undefined })).toThrow("mirror service configuration invalid");
+  expect(() => assertMirrorConfig({ ...goodEnv, MIRROR_POLL_INTERVAL_MS: "500" })).toThrow("mirror service configuration invalid");
+});
