@@ -24,6 +24,13 @@ describe("loadProjectRoutesFile", () => {
     expect(routes[1]!.issue).toBe("natkingsize2/maw-broker#1");
   });
 
+  test("mqtt prefix survives the loader when present and valid — a dropped field would silently un-wire every route", () => {
+    const routes = loadProjectRoutesFile(routesFile([{ ...GOOD[0], mqtt: "canon" }, GOOD[1]]));
+    expect(routes[0]!.mqtt).toBe("canon");
+    expect(routes[1]!.mqtt).toBeUndefined();
+    expect(() => loadProjectRoutesFile(routesFile([{ ...GOOD[0], mqtt: "Bad Name" }]))).toThrow("mqtt prefix invalid");
+  });
+
   test("rejects: wrong mode, bad shape, bad issue ref, duplicates, empty", () => {
     expect(() => loadProjectRoutesFile(routesFile(GOOD, 0o644))).toThrow("project routes file invalid");
     expect(() => loadProjectRoutesFile(routesFile("{not json"))).toThrow("project routes file invalid");

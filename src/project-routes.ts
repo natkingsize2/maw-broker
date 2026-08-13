@@ -15,7 +15,14 @@
 import { lstatSync, readFileSync } from "node:fs";
 import type { Route } from "./types";
 
-export type ProjectRoute = Required<Pick<Route, "name" | "transport" | "destination" | "agent" | "issue">>;
+export type ProjectRoute = Required<Pick<Route, "name" | "transport" | "destination" | "agent" | "issue">> & {
+  /** MQTT topic prefix of the agent's arra-mqtt channel (its oracle name), when the agent is
+   *  woken over the bus (owner redirect 2026-08-13 19:0x: reuse arra-mqtt, not send-keys).
+   *  EXPLICIT, never derived from `agent` — deriving a name from "mba:02-anvil" is exactly the
+   *  substring game the house has been bitten by three times. Absent ⇒ this route is not
+   *  MQTT-forwarded (and the poller must SAY so, not skip silently). */
+  mqtt?: string;
+};
 
 const SNOWFLAKE = /^\d{17,20}$/;
 /** owner/repo#N — bounded so an issue reference can never smuggle text into a room. */
@@ -37,9 +44,10 @@ export function loadProjectRoutesFile(path: string): ProjectRoute[] {
     if (typeof c.destination !== "string" || !SNOWFLAKE.test(c.destination)) throw new Error("project route destination invalid");
     if (typeof c.agent !== "string" || !c.agent) throw new Error("project route agent invalid");
     if (typeof c.issue !== "string" || !ISSUE_RE.test(c.issue)) throw new Error("project route issue invalid");
+    if (c.mqtt !== undefined && (typeof c.mqtt !== "string" || !PROJECT_NAME_RE.test(c.mqtt))) throw new Error("project route mqtt prefix invalid");
     if (seenProject.has(c.name) || seenDestination.has(c.destination)) throw new Error("project route duplicate");
     seenProject.add(c.name); seenDestination.add(c.destination);
-    return { name: c.name, transport: c.transport, destination: c.destination, agent: c.agent, issue: c.issue };
+    return { name: c.name, transport: c.transport, destination: c.destination, agent: c.agent, issue: c.issue, ...(c.mqtt !== undefined ? { mqtt: c.mqtt } : {}) };
   });
 }
 
