@@ -90,11 +90,23 @@ export async function main(env: Record<string, string | undefined> = process.env
   await service.run();
 }
 
-/** Placeholder resolver: the live argus/task→AgentState adapter is a separate, review-gated
- *  piece (it shells out to telemetry and the task board). Until it lands, main() refuses to run
- *  rather than posting an empty/placeholder digest. */
-async function resolveStateSource(_env: Record<string, string | undefined>): Promise<StateSource> {
-  throw new Error("live state source not yet wired");
+/** Live resolver (replaces the refuse-to-run placeholder). Configuration is explicit and
+ *  fail-closed: no roster, no token ⇒ refuse to run, exactly like the placeholder did — the
+ *  mirror never posts a guessed or empty fleet. Exported so a test can pin the wiring. */
+export async function resolveStateSource(env: Record<string, string | undefined>): Promise<StateSource> {
+  const { LiveStateSource, readEnvFileKey } = await import("./state-source-live");
+  const agents = (env.MAW_MIRROR_AGENTS ?? "").split(",").map(a => a.trim()).filter(Boolean);
+  if (agents.length === 0) throw new Error("MAW_MIRROR_AGENTS missing — refuse to mirror a guessed fleet");
+  const tokenFile = env.MAW_ARGUS_ENV_FILE ?? join(env.HOME ?? "", ".config/argus/.env");
+  const token = env.ARGUS_READ_TOKEN ?? readEnvFileKey(tokenFile, "ARGUS_READ_TOKEN");
+  if (!token) throw new Error("ARGUS_READ_TOKEN missing — refuse to mirror without telemetry auth");
+  const phaseDirs = (env.MAW_PHASE_DIRS ?? "").split(":").map(d => d.trim()).filter(Boolean);
+  return new LiveStateSource({
+    argusUrl: env.MAW_ARGUS_URL ?? "https://claude-telemetry.natkingsize2.workers.dev/api/live",
+    token,
+    agents,
+    phaseDirs,
+  });
 }
 
 if (import.meta.main) { main().catch(error => { console.error(String(error?.message ?? error)); process.exit(1); }); }
