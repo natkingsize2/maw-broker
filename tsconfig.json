@@ -8,5 +8,6 @@
     "target": "ES2022",
     "types": ["bun", "node"]
   },
+  // index.ts is a maw-js host entrypoint whose host-only module types are not part of this standalone clean-clone gate.
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

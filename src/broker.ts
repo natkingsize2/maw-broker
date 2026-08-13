@@ -34,6 +34,10 @@ export class Broker {
     } finally { this.store.finishAttempt(input.messageId); }
   }
 
+  isOwner(authorId: string) { return authorId === this.ownerId; }
+  ignore(input: InboundMessage) { this.store.audit({ at: new Date().toISOString(), event: "ignored", messageId: input.messageId, route: input.route, reason: "non-command" }); }
+  rejectOwnerMismatch(input: InboundMessage) { this.store.audit({ at: new Date().toISOString(), event: "rejected", messageId: input.messageId, route: input.route, reason: "foreign author" }); }
+
   private reject(input: InboundMessage, code: BrokerFailureCode, reason: string): never {
     this.store.audit({ at: new Date().toISOString(), event: "rejected", messageId: input.messageId, route: input.route, reason });
     throw new BrokerError(code, reason);

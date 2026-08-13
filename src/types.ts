@@ -20,7 +20,7 @@ export type BrokerEnvelope = {
 
 export type AuditRecord = {
   at: string;
-  event: "accepted" | "rejected" | "resolved" | "replay" | "error";
+  event: "accepted" | "rejected" | "resolved" | "replay" | "error" | "ignored";
   messageId?: string;
   route?: string;
   decision?: Decision;
