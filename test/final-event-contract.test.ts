@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
-  ACCEPTED_KIND, ALLOWED_ROUTE, CONTENT_EVENT_TYPE, CONTENT_SOURCE, IDEMPOTENCY_KEY_PREFIX, REJECTED_KINDS, SCHEMA,
-  FinalEventError, InMemoryFinalEventStore, canonicalize, computeContentDigest,
+  ACCEPTED_KIND, ALLOWED_ROUTE, CONTENT_EVENT_TYPE, CONTENT_SOURCE, IDEMPOTENCY_KEY_PREFIX, IDEMPOTENCY_KEY_SEPARATOR,
+  OBSOLETE_CONTENT_EVENT_TYPE_PLACEHOLDER, OBSOLETE_CONTENT_SOURCE_PLACEHOLDER, REJECTED_KINDS, SCHEMA,
+  FinalEventError, InMemoryFinalEventStore, buildIdempotencyKey, canonicalize, computeContentDigest,
   handleFinalEvent, loadFinalEventSecrets, validateFinalEventRequest,
   type FinalEventAuth, type LiveSiangFinalEventContent,
 } from "../src/final-event-contract";
@@ -19,7 +20,7 @@ function goodContent(overrides: Partial<LiveSiangFinalEventContent> = {}): LiveS
 }
 const content = goodContent();
 const digest = computeContentDigest(content);
-const IDEM_KEY = IDEMPOTENCY_KEY_PREFIX + EVENT_ID;
+const IDEM_KEY = buildIdempotencyKey(EVENT_ID);
 
 function goodBody(overrides: Record<string, unknown> = {}) {
   return { schema: SCHEMA, route: ALLOWED_ROUTE, kind: ACCEPTED_KIND, eventId: EVENT_ID, idempotencyKey: IDEM_KEY, contentDigest: digest, content, ...overrides };
@@ -150,18 +151,47 @@ describe("validateFinalEventRequest — cross-field rules (owner 2026-08-14 02:1
     try { validateFinalEventRequest(body); } catch (e) { threw = e as FinalEventError; }
     expect(threw?.code).toBe("EVENT_ID_MISMATCH");
   });
-  test("idempotencyKey must equal the fixed prefix + eventId, literal concatenation, no separator", () => {
-    expect(IDEM_KEY).toBe("livesiang-final-v1evt-1"); // proves the no-separator reading is what's implemented
+  test("idempotencyKey must equal the fixed prefix + COLON + eventId (corrected 2026-08-14 02:45 — owner named the colon explicitly)", () => {
+    expect(IDEMPOTENCY_KEY_SEPARATOR).toBe(":");
+    expect(IDEM_KEY).toBe("livesiang-final-v1:evt-1");
     let threw: FinalEventError | undefined;
-    try { validateFinalEventRequest(goodBody({ idempotencyKey: "livesiang-final-v1:evt-1" })); } catch (e) { threw = e as FinalEventError; } // a plausible BUT WRONG guess with a separator
+    try { validateFinalEventRequest(goodBody({ idempotencyKey: "livesiang-final-v1evt-1" })); } catch (e) { threw = e as FinalEventError; } // the OLD (02:18) no-colon format
     expect(threw?.code).toBe("IDEMPOTENCY_KEY_FORMAT");
     expect(threw?.message).toContain(IDEM_KEY);
   });
+  test("REJECTED: the OLD no-colon idempotencyKey format from the 8f8fbd17 placeholder round no longer validates", () => {
+    const oldFormatKey = IDEMPOTENCY_KEY_PREFIX + EVENT_ID; // "livesiang-final-v1evt-1", no separator
+    expect(oldFormatKey).not.toBe(IDEM_KEY);
+    let threw: FinalEventError | undefined;
+    try { validateFinalEventRequest(goodBody({ idempotencyKey: oldFormatKey })); } catch (e) { threw = e as FinalEventError; }
+    expect(threw?.code).toBe("IDEMPOTENCY_KEY_FORMAT");
+  });
   test("correct idempotencyKey for a different eventId is accepted on its own terms", () => {
     const c2 = goodContent({ event_id: "evt-2" });
-    const body = { schema: SCHEMA, route: ALLOWED_ROUTE, kind: ACCEPTED_KIND, eventId: "evt-2", idempotencyKey: IDEMPOTENCY_KEY_PREFIX + "evt-2", contentDigest: computeContentDigest(c2), content: c2 };
+    const body = { schema: SCHEMA, route: ALLOWED_ROUTE, kind: ACCEPTED_KIND, eventId: "evt-2", idempotencyKey: buildIdempotencyKey("evt-2"), contentDigest: computeContentDigest(c2), content: c2 };
     const req = validateFinalEventRequest(body);
     expect(req.eventId).toBe("evt-2");
+  });
+});
+
+describe("REJECTED: the OLD 8f8fbd17 placeholder literals no longer validate (owner corrected 2026-08-14 02:45)", () => {
+  test("content.event_type = \"final\" (old placeholder) is now refused — real value is \"conversation.user.final\"", () => {
+    let threw: FinalEventError | undefined;
+    try { validateFinalEventRequest(bodyWithContent({ event_type: OBSOLETE_CONTENT_EVENT_TYPE_PLACEHOLDER })); } catch (e) { threw = e as FinalEventError; }
+    expect(threw?.code).toBe("CONTENT_REJECTED");
+    expect(OBSOLETE_CONTENT_EVENT_TYPE_PLACEHOLDER).not.toBe(CONTENT_EVENT_TYPE);
+  });
+  test("content.source = \"maw-pipecat\" (old placeholder, same string as the route name) is now refused — real value is \"pipecat:1.6.0\"", () => {
+    let threw: FinalEventError | undefined;
+    try { validateFinalEventRequest(bodyWithContent({ source: OBSOLETE_CONTENT_SOURCE_PLACEHOLDER })); } catch (e) { threw = e as FinalEventError; }
+    expect(threw?.code).toBe("CONTENT_REJECTED");
+    expect(OBSOLETE_CONTENT_SOURCE_PLACEHOLDER).not.toBe(CONTENT_SOURCE);
+    expect(OBSOLETE_CONTENT_SOURCE_PLACEHOLDER).toBe(ALLOWED_ROUTE); // confirms it WAS the route-name-reuse guess
+  });
+  test("the CORRECT real producer literals are accepted", () => {
+    const req = validateFinalEventRequest(bodyWithContent({ event_type: CONTENT_EVENT_TYPE, source: CONTENT_SOURCE }));
+    expect(req.content.event_type).toBe("conversation.user.final");
+    expect(req.content.source).toBe("pipecat:1.6.0");
   });
 });
 

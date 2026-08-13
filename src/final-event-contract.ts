@@ -16,6 +16,15 @@
  * (`test/fixtures/final-event-vector-v1.json`), so the canonicalization/digest algorithm is
  * documented precisely enough for byte-identical cross-language reproduction.
  *
+ * CORRECTED 2026-08-14 02:45: the 02:18 commit (`8f8fbd17`) DEFINED `event_type`/`source`/the
+ * idempotencyKey separator as placeholders, flagged explicitly as unconfirmed. Owner has now
+ * supplied the real values — "these are producer constants already tested in liveSiang" — which
+ * OVERRIDE those placeholders: `event_type="conversation.user.final"` (was `"final"`),
+ * `source="pipecat:1.6.0"` (was `"maw-pipecat"`), idempotencyKey uses a COLON separator (was no
+ * separator). The old placeholder values are now explicitly REJECTED, not merely superseded —
+ * see the `test/final-event-contract.test.ts` cases proving `event_type: "final"`,
+ * `source: "maw-pipecat"`, and a no-colon idempotencyKey each fail closed.
+ *
  * Deliberately standalone: imports NOTHING from `runner.ts`/`bridge-server.ts`/
  * `bridge-client.ts` — no Discord credential, no broker daemon, no live config anywhere in this
  * module's reachable graph (owner: "Do not use real token Discord broker daemon or live
@@ -55,23 +64,26 @@ export const REJECTED_KINDS = ["raw_audio", "partial", "assistant_tts"] as const
 export const ACCEPTED_KIND = "final";
 
 /**
- * Content literals — owner (2026-08-14 02:18): "define content exactly as the liveSiang v1
- * final event object: conversation_id event_id event_type final_text locale occurred_at schema
- * source turn_id... reject... wrong event_type/source." The owner gave the KEY NAMES but not the
- * required literal VALUES for `event_type`/`source`/`schema` (a nested schema tag inside
- * content, distinct from the envelope's own `schema` field). No prior liveSiang schema exists to
- * read these from (confirmed absent, see file header) — the three constants below are therefore
- * DEFINED here, not matched: `event_type` mirrors the envelope's `kind: "final"`, `source` uses
- * the exact route name the owner already gave verbatim ("maw-pipecat"), `content.schema` reuses
- * the one schema identifier the owner did give. **Flagged explicitly to the owner/builder as
- * decisions requiring confirmation, not facts** — see SPEC-final-event-receipt-v1.md.
+ * Content literals — CONFIRMED real liveSiang producer constants (owner, 2026-08-14 02:45):
+ * "These are producer constants already tested in liveSiang and override 8f8fbd17 placeholder
+ * literals." The 02:18 commit's `event_type="final"` / `source="maw-pipecat"` were explicitly
+ * flagged placeholders pending confirmation — this is that confirmation, with different real
+ * values. `content.schema` was already correct (owner: "content.schema remains
+ * livesiang.broker.final-event.v1").
  */
-export const CONTENT_EVENT_TYPE = "final";
-export const CONTENT_SOURCE = "maw-pipecat";
-/** idempotencyKey formula, owner's literal wording: "livesiang-final-v1 plus eventId" — direct
- *  string concatenation, NO separator (none was specified; inventing one would be an unrequested
- *  design choice). `idem-1` → `"livesiang-final-v1idem-1"`, exactly. */
+export const CONTENT_EVENT_TYPE = "conversation.user.final";
+export const CONTENT_SOURCE = "pipecat:1.6.0";
+/** OLD placeholder values, kept as named constants ONLY so tests can assert they are now
+ *  actively rejected (not just "no longer the default") — never used in any accept path. */
+export const OBSOLETE_CONTENT_EVENT_TYPE_PLACEHOLDER = "final";
+export const OBSOLETE_CONTENT_SOURCE_PLACEHOLDER = "maw-pipecat";
+
+/** idempotencyKey formula — CORRECTED 2026-08-14 02:45: owner's exact wording this round was
+ *  "livesiang-final-v1 colon eventId exactly" — a colon separator, explicitly named this time
+ *  (the 02:18 round had no separator specified, so none was used; that is now superseded). */
 export const IDEMPOTENCY_KEY_PREFIX = "livesiang-final-v1";
+export const IDEMPOTENCY_KEY_SEPARATOR = ":";
+export function buildIdempotencyKey(eventId: string): string { return `${IDEMPOTENCY_KEY_PREFIX}${IDEMPOTENCY_KEY_SEPARATOR}${eventId}`; }
 
 export type LiveSiangFinalEventContent = {
   conversation_id: string;
@@ -193,8 +205,8 @@ export function validateFinalEventRequest(body: unknown): FinalEventRequest {
   const content = validateContent(b.content);
 
   if (b.eventId !== content.event_id) throw new FinalEventError("EVENT_ID_MISMATCH", "eventId must equal content.event_id");
-  const expectedIdempotencyKey = IDEMPOTENCY_KEY_PREFIX + b.eventId;
-  if (b.idempotencyKey !== expectedIdempotencyKey) throw new FinalEventError("IDEMPOTENCY_KEY_FORMAT", `idempotencyKey must equal "${IDEMPOTENCY_KEY_PREFIX}" + eventId (expected "${expectedIdempotencyKey}")`);
+  const expectedIdempotencyKey = buildIdempotencyKey(b.eventId);
+  if (b.idempotencyKey !== expectedIdempotencyKey) throw new FinalEventError("IDEMPOTENCY_KEY_FORMAT", `idempotencyKey must equal "${IDEMPOTENCY_KEY_PREFIX}${IDEMPOTENCY_KEY_SEPARATOR}" + eventId (expected "${expectedIdempotencyKey}")`);
 
   return { schema: b.schema, route: b.route, kind: b.kind, eventId: b.eventId, idempotencyKey: b.idempotencyKey, contentDigest: b.contentDigest, content };
 }

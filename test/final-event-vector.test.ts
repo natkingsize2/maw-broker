@@ -41,7 +41,11 @@ describe("committed final-event test vector (Thai text) — self-verifying again
     expect(replay).toEqual(VECTOR.expectedReceiptOnReplay);
   });
 
-  test("the vector's idempotencyKey is literally the fixed prefix concatenated with eventId, no separator", () => {
-    expect(VECTOR.request.idempotencyKey).toBe("livesiang-final-v1" + VECTOR.request.eventId);
+  test("the vector's idempotencyKey is the fixed prefix + COLON + eventId (corrected 2026-08-14 02:45)", () => {
+    expect(VECTOR.request.idempotencyKey).toBe("livesiang-final-v1:" + VECTOR.request.eventId);
+  });
+  test("the vector uses the CONFIRMED real producer literals, not the 8f8fbd17 placeholders", () => {
+    expect(VECTOR.request.content.event_type).toBe("conversation.user.final");
+    expect(VECTOR.request.content.source).toBe("pipecat:1.6.0");
   });
 });

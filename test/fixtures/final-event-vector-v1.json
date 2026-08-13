@@ -1,22 +1,23 @@
 {
   "_comment": "Canonical test vector for livesiang.broker.final-event.v1 — committed 2026-08-14 for a Python builder to implement an independent mapping against. contentDigest was computed by the real computeContentDigest() in src/final-event-contract.ts (sha256 of the canonicalized content: recursively key-sorted, compact separators [no spaces], UTF-8 bytes, non-ASCII characters NOT escaped to \\uXXXX). A Python implementation MUST use json.dumps(content, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8') then hashlib.sha256(...).hexdigest() to reproduce this exact digest — ensure_ascii=False is not optional, the Thai text below will produce a DIFFERENT (wrong) digest if you forget it. See test/final-event-vector.test.ts for the self-verifying assertion (recomputes the digest from `request.content` and checks it equals `request.contentDigest`).",
-  "canonicalContentString": "{\"conversation_id\":\"conv-2026-08-14-0001\",\"event_id\":\"evt-th-0001\",\"event_type\":\"final\",\"final_text\":\"สวัสดีค่ะ วันนี้อากาศดีมากเลย พรุ่งนี้ฝนจะตกไหมคะ\",\"locale\":\"th-TH\",\"occurred_at\":\"2026-08-14T02:20:00.000Z\",\"schema\":\"livesiang.broker.final-event.v1\",\"source\":\"maw-pipecat\",\"turn_id\":\"turn-0007\"}",
+  "_correctedAt": "2026-08-14T02:45+07:00 — event_type/source/idempotencyKey-separator corrected to real liveSiang producer constants per owner directive, overriding the 8f8fbd17 placeholder vector (event_type was 'final', source was 'maw-pipecat', idempotencyKey had no separator).",
+  "canonicalContentString": "{\"conversation_id\":\"conv-2026-08-14-0001\",\"event_id\":\"evt-th-0001\",\"event_type\":\"conversation.user.final\",\"final_text\":\"สวัสดีค่ะ วันนี้อากาศดีมากเลย พรุ่งนี้ฝนจะตกไหมคะ\",\"locale\":\"th-TH\",\"occurred_at\":\"2026-08-14T02:20:00.000Z\",\"schema\":\"livesiang.broker.final-event.v1\",\"source\":\"pipecat:1.6.0\",\"turn_id\":\"turn-0007\"}",
   "request": {
     "schema": "livesiang.broker.final-event.v1",
     "route": "maw-pipecat",
     "kind": "final",
     "eventId": "evt-th-0001",
-    "idempotencyKey": "livesiang-final-v1evt-th-0001",
-    "contentDigest": "c0aa012fcb25c8237305e27d468d9ca372f4a5f6a52169ea6b1ef2a7c20a89af",
+    "idempotencyKey": "livesiang-final-v1:evt-th-0001",
+    "contentDigest": "8ddd8eccd37218ea2c2da0741005e2baa36913cce7afa9f7e5da7fe0854ed036",
     "content": {
       "conversation_id": "conv-2026-08-14-0001",
       "event_id": "evt-th-0001",
-      "event_type": "final",
+      "event_type": "conversation.user.final",
       "final_text": "สวัสดีค่ะ วันนี้อากาศดีมากเลย พรุ่งนี้ฝนจะตกไหมคะ",
       "locale": "th-TH",
       "occurred_at": "2026-08-14T02:20:00.000Z",
       "schema": "livesiang.broker.final-event.v1",
-      "source": "maw-pipecat",
+      "source": "pipecat:1.6.0",
       "turn_id": "turn-0007"
     }
   },
@@ -26,8 +27,8 @@
     "schema": "livesiang.broker.final-event.v1",
     "route": "maw-pipecat",
     "eventId": "evt-th-0001",
-    "idempotencyKey": "livesiang-final-v1evt-th-0001",
-    "contentDigest": "c0aa012fcb25c8237305e27d468d9ca372f4a5f6a52169ea6b1ef2a7c20a89af",
+    "idempotencyKey": "livesiang-final-v1:evt-th-0001",
+    "contentDigest": "8ddd8eccd37218ea2c2da0741005e2baa36913cce7afa9f7e5da7fe0854ed036",
     "receivedAt": "2026-08-14T02:20:05.123Z"
   },
   "expectedReceiptOnReplay": {
@@ -35,8 +36,8 @@
     "schema": "livesiang.broker.final-event.v1",
     "route": "maw-pipecat",
     "eventId": "evt-th-0001",
-    "idempotencyKey": "livesiang-final-v1evt-th-0001",
-    "contentDigest": "c0aa012fcb25c8237305e27d468d9ca372f4a5f6a52169ea6b1ef2a7c20a89af",
+    "idempotencyKey": "livesiang-final-v1:evt-th-0001",
+    "contentDigest": "8ddd8eccd37218ea2c2da0741005e2baa36913cce7afa9f7e5da7fe0854ed036",
     "receivedAt": "2026-08-14T02:20:05.123Z"
   }
 }

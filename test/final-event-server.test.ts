@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startFinalEventServer } from "../src/final-event-server";
-import { ACCEPTED_KIND, ALLOWED_ROUTE, CONTENT_EVENT_TYPE, CONTENT_SOURCE, IDEMPOTENCY_KEY_PREFIX, SCHEMA, InMemoryFinalEventStore, FileFinalEventStore, computeContentDigest, type FinalEventSecrets, type LiveSiangFinalEventContent } from "../src/final-event-contract";
+import { ACCEPTED_KIND, ALLOWED_ROUTE, buildIdempotencyKey, CONTENT_EVENT_TYPE, CONTENT_SOURCE, SCHEMA, InMemoryFinalEventStore, FileFinalEventStore, computeContentDigest, type FinalEventSecrets, type LiveSiangFinalEventContent } from "../src/final-event-contract";
 
 /** Real local HTTP (Bun.serve + fetch), fully in-memory store — no Discord, no bridge, no live
  *  config anywhere in this file, matching the owner's "local in-memory HTTP only" scope. Every
@@ -19,7 +19,7 @@ const content: LiveSiangFinalEventContent = {
   schema: SCHEMA, source: CONTENT_SOURCE, turn_id: "turn-1",
 };
 const digest = computeContentDigest(content);
-const IDEM_KEY = IDEMPOTENCY_KEY_PREFIX + EVENT_ID;
+const IDEM_KEY = buildIdempotencyKey(EVENT_ID);
 const goodBody = (overrides: Record<string, unknown> = {}) => ({ schema: SCHEMA, route: ALLOWED_ROUTE, kind: ACCEPTED_KIND, eventId: EVENT_ID, idempotencyKey: IDEM_KEY, contentDigest: digest, content, ...overrides });
 
 async function post(port: number, body: unknown, token = SECRETS.authorizedToken) {

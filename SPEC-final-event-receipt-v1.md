@@ -36,7 +36,7 @@ Content-Type: application/json
   "route": "maw-pipecat",
   "kind": "final",
   "eventId": "<must equal content.event_id, see cross-field rules>",
-  "idempotencyKey": "<must equal 'livesiang-final-v1' + eventId, see cross-field rules>",
+  "idempotencyKey": "<must equal 'livesiang-final-v1:' + eventId, see cross-field rules>",
   "contentDigest": "<sha256 hex, 64 chars, of the canonical form of `content`>",
   "content": { "...": "see § content schema below — a CLOSED 9-key object, not opaque" }
 }
@@ -46,7 +46,7 @@ Content-Type: application/json
 keys before serializing (see `canonicalize()` in the code) — so two logically-identical payloads
 built by different code paths always produce the same digest, regardless of key insertion order.
 
-### content schema (owner-specified key set, 2026-08-14 02:18)
+### content schema (owner-specified key set, 2026-08-14 02:18 — literals CORRECTED 02:45)
 
 Exactly these 9 keys — no more, no fewer. Extra or missing keys are refused (`CONTENT_REJECTED`).
 
@@ -54,35 +54,41 @@ Exactly these 9 keys — no more, no fewer. Extra or missing keys are refused (`
 |---|---|---|
 | `conversation_id` | string | non-empty, ≤256 chars |
 | `event_id` | string | non-empty, ≤256 chars, **must equal the envelope's `eventId`** |
-| `event_type` | string | **must equal exactly `"final"`** |
+| `event_type` | string | **must equal exactly `"conversation.user.final"`** |
 | `final_text` | string | non-empty, ≤4000 chars — the completed turn's text (may be any language, e.g. Thai) |
 | `locale` | string | non-empty, ≤256 chars, e.g. `"th-TH"` |
 | `occurred_at` | string | ISO8601 UTC, e.g. `"2026-08-14T02:20:00.000Z"` (regex: `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$`) |
 | `schema` | string | **must equal exactly `"livesiang.broker.final-event.v1"`** (same identifier as the envelope's own `schema`) |
-| `source` | string | **must equal exactly `"maw-pipecat"`** |
+| `source` | string | **must equal exactly `"pipecat:1.6.0"`** |
 | `turn_id` | string | non-empty, ≤256 chars |
 
-⚠️ **The owner gave the key NAMES but not the required literal VALUES for `event_type`,
-`source`, and `content.schema`.** No prior liveSiang schema exists anywhere to read these from
-(confirmed absent — see file header). The three literal values above (`event_type: "final"`,
-`source: "maw-pipecat"`, `schema` reusing the one identifier the owner did give) are **DEFINED
-by this document, not matched against a prior spec** — they are the most defensible reading of
-the owner's constraints (mirrors the envelope's own `kind: "final"`; reuses the exact route name
-the owner already gave verbatim), but they are a design decision requiring confirmation, not a
-fact. If the Python builder's real liveSiang code emits different literal values here, that is
-the signal to correct — this document, not silently — not evidence this document is wrong on
-its own.
+✅ **CORRECTED 2026-08-14 02:45.** The 02:18 round of this document flagged `event_type` and
+`source` as literals **DEFINED here, not matched against a prior spec** (no schema existed to
+read them from). The owner has since supplied the real values directly: *"These are producer
+constants already tested in liveSiang and override 8f8fbd17 placeholder literals."*
 
-### Cross-field rules (owner 2026-08-14 02:18)
+| field | 02:18 placeholder (now REJECTED) | confirmed real value |
+|---|---|---|
+| `content.event_type` | `"final"` | **`"conversation.user.final"`** |
+| `content.source` | `"maw-pipecat"` (reused the route name — a reasonable but wrong guess) | **`"pipecat:1.6.0"`** |
+| `content.schema` | `"livesiang.broker.final-event.v1"` | unchanged, was already correct |
 
-- **`eventId` must equal `content.event_id`.** Mismatch ⇒ `EVENT_ID_MISMATCH` (400).
-- **`idempotencyKey` must equal `"livesiang-final-v1"` concatenated directly with `eventId` —
-  literal string concatenation, NO separator.** The owner's exact wording was *"idempotencyKey
-  must equal livesiang-final-v1 plus eventId"* — no separator character was specified, so none
-  is used. For `eventId = "evt-th-0001"`, the required `idempotencyKey` is
-  `"livesiang-final-v1evt-th-0001"` (see the committed test vector — this exact string is in
-  it). A plausible-but-wrong guess with a separator (e.g. `"livesiang-final-v1:evt-th-0001"`)
-  is refused with `IDEMPOTENCY_KEY_FORMAT` (400), naming the expected value in the error message.
+The old placeholder values are not merely superseded — submitting them now is an explicit
+rejection (`CONTENT_REJECTED`), proven by dedicated tests in `test/final-event-contract.test.ts`
+("REJECTED: the OLD 8f8fbd17 placeholder literals no longer validate").
+
+### Cross-field rules (owner 2026-08-14 02:18 — separator CORRECTED 02:45)
+
+- **`eventId` must equal `content.event_id`.** Mismatch ⇒ `EVENT_ID_MISMATCH` (400). Unchanged
+  since 02:18.
+- **`idempotencyKey` must equal `"livesiang-final-v1"` + `":"` + `eventId`.** The 02:18 round
+  read the owner's wording ("livesiang-final-v1 plus eventId") as literal concatenation with no
+  separator, and flagged that reading explicitly. The 02:45 round supplied the real format
+  directly: *"idempotencyKey must equal livesiang-final-v1 colon eventId exactly"* — a colon,
+  named explicitly this time. For `eventId = "evt-th-0001"`, the required `idempotencyKey` is
+  **`"livesiang-final-v1:evt-th-0001"`** (see the committed test vector). The OLD no-colon
+  format (`"livesiang-final-v1evt-th-0001"`) is now refused with `IDEMPOTENCY_KEY_FORMAT` (400),
+  proven by a dedicated test.
 
 ### Digest algorithm — precise enough for cross-language (Python) reproduction
 
@@ -136,10 +142,10 @@ caller can trust `receivedAt` as proof this is a safe replay of prior work, not 
 | `kind` ≠ `"final"` | 400 | `KIND_REJECTED` | includes `raw_audio`/`partial`/`assistant_tts` AND any unlisted kind — fail closed, not an allowlist gap |
 | `contentDigest` doesn't match `sha256(canonicalize(content))` | 400 | `DIGEST_MISMATCH` | integrity check, distinct from idempotency conflict below — checked BEFORE content shape, so tampered bytes are caught before their structure is even inspected |
 | `content` has missing/unknown/extra keys vs the exact 9-key set | 400 | `CONTENT_REJECTED` | names the specific missing/unknown keys in the message |
-| `content.event_type` ≠ `"final"`, `content.source` ≠ `"maw-pipecat"`, or `content.schema` ≠ `"livesiang.broker.final-event.v1"` | 400 | `CONTENT_REJECTED` | includes `raw_audio`/`partial`/`assistant_tts` as `event_type` values, same rejection reasoning as the envelope `kind` field |
+| `content.event_type` ≠ `"conversation.user.final"`, `content.source` ≠ `"pipecat:1.6.0"`, or `content.schema` ≠ `"livesiang.broker.final-event.v1"` | 400 | `CONTENT_REJECTED` | includes the OLD placeholder literals (`"final"`, `"maw-pipecat"`) as well as `raw_audio`/`partial`/`assistant_tts` |
 | `content.final_text` empty or >4000 chars, `content.occurred_at` not ISO8601 UTC, or any other content field empty/oversized | 400 | `CONTENT_REJECTED` | |
 | `eventId` ≠ `content.event_id` | 400 | `EVENT_ID_MISMATCH` | |
-| `idempotencyKey` ≠ `"livesiang-final-v1" + eventId` | 400 | `IDEMPOTENCY_KEY_FORMAT` | names the expected value in the error message |
+| `idempotencyKey` ≠ `"livesiang-final-v1:" + eventId` | 400 | `IDEMPOTENCY_KEY_FORMAT` | names the expected value in the error message; the OLD no-colon format is also refused here |
 | same `idempotencyKey`, **different** `contentDigest` than what's stored | 409 | `IDEMPOTENCY_CONFLICT` | the ALREADY-STORED record is never overwritten or mutated |
 | unknown path / wrong method | 404 | — | |
 
