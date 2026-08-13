@@ -39,7 +39,10 @@ export function assertProductionChannel(routes: Route[]): void {
   if (routes.length !== 1 || routes[0]!.destination !== PRODUCTION_CHANNEL_ID) throw new Error("routes file channel differs from production pin");
 }
 
-export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
+/** Construction path only — no polling, no network. Split from main() so tests can pin that
+ *  the production-channel assertion is actually ON this path (probe M5: a direct-call test of
+ *  assertProductionChannel proves the guard works, never that anything still invokes it). */
+export function buildRunner(env: Record<string, string | undefined>): { runner: BrokerRunner; intervalMs: number; maxPolls: number } {
   const secrets = loadRunnerSecrets(env);
   const routesFile = env.MAW_BROKER_ROUTES_FILE;
   const storeRoot = env.MAW_BROKER_STORE_ROOT;
@@ -63,6 +66,11 @@ export async function main(env: Record<string, string | undefined> = process.env
     injector: createMawInjector(destination => registry.get(destination)?.agent),
     reactor: client,
   });
+  return { runner, intervalMs, maxPolls };
+}
+
+export async function main(env: Record<string, string | undefined> = process.env): Promise<void> {
+  const { runner, intervalMs, maxPolls } = buildRunner(env);
 
   let stopping = false;
   const stop = () => { stopping = true; };

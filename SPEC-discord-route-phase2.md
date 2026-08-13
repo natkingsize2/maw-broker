@@ -53,5 +53,21 @@ project room (Discord channel) → broker (identity gate + audit) → owning age
 6. Launcher for the original room under all constraints; install remains pinned + byte-verified
    with archive rollback.
 
-Out of scope: voice, Pipecat, multi-room enablement beyond the first route, per-agent token
-provisioning (owner-only act; a checklist is delivered to the owner separately).
+## Recorded limitation — evidence channel is only as strong as maw API authorization
+(probe G6 re-review 2026-08-13 15:1x, maw-js `70af8fd0`) The `replied` status the injector
+trusts is a **convention, not an enforcement**: `POST /api/reply/:correlationId`
+(`src/api/request-reply.ts:99-104`) has no auth and does not check the responder is the
+addressed agent; `GET /api/requests` (`:147`) lists every pending correlationId openly; the
+API binds `0.0.0.0:3456` when peers exist (`src/core/bind-host.ts:39` — probe reached it
+from a LAN IP). Anyone who can reach port 3456 can enumerate pending ids and forge a
+reply → the broker marks a command resolved the agent never ran. This is an **intentional**
+remote attack path, not the *accidental* self-Ack that G6 closed. **This receipt is
+trustworthy only to the degree the maw API is authorized/reachable** — port 3456 exposure is
+the ceiling on its strength. Fix belongs in maw-js (auth on `/api/reply`; close or
+loopback-bind `/api/requests`), not in this broker.
+
+- Upstream issue (maw hey/capture same-channel echo + unauthenticated reply): _URL recorded in
+  acceptance log once filed (patch to `natkingsize2` mirror or owner-owned repo only; per house
+  rule no `gh issue create` on third-party repos)._
+- G6 residual HOLD: reaction live ordering (👀→✅) and idempotency across restart are proven at
+  the unit level only; live Discord ordering not yet exercised.

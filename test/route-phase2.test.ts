@@ -240,3 +240,19 @@ test("production pin: the original room passes, a wrong-but-valid snowflake fail
   expect(() => assertProductionChannel([{ ...good, destination: "9999999999999999999" }])).toThrow("differs from production pin");
   expect(() => assertProductionChannel([])).toThrow("differs from production pin");
 });
+
+// ── M5 closure: pin the assertion to the CONSTRUCTION PATH, not just the function
+import { buildRunner } from "../src/route-launcher";
+test("buildRunner refuses a wrong-channel routes file on the real construction path", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-p2-buildrun-"));
+  const routesPath = join(root, "routes.json");
+  writeFileSync(routesPath, JSON.stringify([{ name: "general", transport: "discord-text", destination: "9999999999999999999", agent: "03-canon:1" }]), { mode: 0o600 });
+  const env = {
+    DISCORD_BOT_TOKEN: "test-token",
+    MAW_BROKER_KEY_B64: Buffer.alloc(32, 5).toString("base64"),
+    MAW_BROKER_OWNER_ID: NAT_USER_ID,
+    MAW_BROKER_ROUTES_FILE: routesPath,
+    MAW_BROKER_STORE_ROOT: join(root, "store-root"),
+  };
+  expect(() => buildRunner(env)).toThrow("differs from production pin");
+});
