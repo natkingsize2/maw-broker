@@ -86,3 +86,46 @@ test("a summary with newlines/padding is flattened in the rendered digest", () =
   expect(out).not.toContain("\nline2");
   expect(out).toContain("line1 line2 trailing");
 });
+
+// ── anvil acceptance: EXACTLY ONE visible sink, ZERO to #canon, restart = no second message
+import type { MirrorState, MirrorStateStore } from "../src/state-mirror";
+
+test("both channels configured: a state change posts to project ONLY, canon count stays 0", async () => {
+  const counts: Record<string, number> = { project: 0, canon: 0 };
+  const client = {
+    postMessage: async (ch: string) => { counts[ch === "1056224550129508415" ? "project" : "canon"]++; return { messageId: "m1" }; },
+    editMessage: async (ch: string) => { counts[ch === "1056224550129508415" ? "project" : "canon"]++; },
+  };
+  // Only the project sink is wired — the canon channel client exists but the mirror never holds it.
+  const mirror = new StateMirror(new DiscordDigestSink(client, "1056224550129508415"));
+  await mirror.reconcile([s("canon", "active", "on route")]);
+  await mirror.reconcile([s("canon", "blocked", "waiting")]);
+  expect(counts.project).toBe(2);   // one post + one edit
+  expect(counts.canon).toBe(0);     // never
+});
+
+function memStore(): { store: MirrorStateStore; ref: { v?: MirrorState } } {
+  const ref: { v?: MirrorState } = {};
+  return { ref, store: { load: () => ref.v, save: (st) => { ref.v = st; } } };
+}
+
+test("restart replay produces NO second visible message — persisted id routes to edit", async () => {
+  const { calls, sink } = recordingSink();
+  const { store } = memStore();
+  const first = new StateMirror(sink, store);
+  expect(await first.reconcile([s("canon", "active", "a")])).toBe("posted");
+  // process dies and restarts: a brand-new mirror loads the persisted state
+  const restarted = new StateMirror(sink, store);
+  expect(await restarted.reconcile([s("canon", "active", "a")])).toBe("noop");        // identical → nothing
+  expect(await restarted.reconcile([s("canon", "done", "a")])).toBe("edited");         // change → edit, not post
+  expect(calls.filter(c => c.startsWith("post:")).length).toBe(1);                     // still exactly one post ever
+});
+
+test("restart with an identical state emits nothing at all (no post, no edit)", async () => {
+  const { calls, sink } = recordingSink();
+  const { store } = memStore();
+  await new StateMirror(sink, store).reconcile([s("a", "active", "1")]);
+  const after = calls.length;
+  await new StateMirror(sink, store).reconcile([s("a", "active", "1")]);
+  expect(calls.length).toBe(after);   // second process added nothing
+});
