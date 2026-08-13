@@ -132,18 +132,21 @@ export class LiveStateSource implements StateSource {
         return {
           agent,
           phase: "offline" as AgentPhase,
-          summary: "ไม่มีแถว telemetry — วัดไม่ได้ ไม่ใช่ว่าง" + (overlay ? ` · ${overlay}` : ""),
+          summary: "ไม่มีแถว telemetry — วัดไม่ได้ ไม่ใช่ว่าง" + (overlay ? ` · ${overlay.text}` : ""),
           version: 0,
         };
       }
       const ageMs = Math.max(0, at - row.latest_ts);
       let phase: AgentPhase = ageMs <= this.activeWithinMs ? "active" : ageMs <= this.offlineAfterMs ? "idle" : "offline";
-      if (overlay?.startsWith("task#") && overlay.includes("blocked_external")) phase = "blocked";
+      // Structured flag, NOT a substring test on the rendered label (probe finding (6): matching
+      // the composed string is fail-open the day the label format changes — the house's
+      // boundary-vs-substring disease in one line).
+      if (overlay?.blocked) phase = "blocked";
       const ctx = Number.isFinite(row.context_used_pct) ? `ctx ${row.context_used_pct}%` : "ctx วัดไม่ได้";
       const doing = row.session_name || row.short_dir || "?";
       const ageMin = Math.round(ageMs / 60000);
       const parts = [ctx, doing, `วัด ${ageMin}m`];
-      if (overlay) parts.push(overlay);
+      if (overlay) parts.push(overlay.text);
       return { agent, phase, summary: parts.join(" · "), version: row.latest_ts };
     });
   }
@@ -165,9 +168,10 @@ export class LiveStateSource implements StateSource {
     return rows;
   }
 
-  /** newest FRESH sidecar per assignee, rendered as a short overlay string. A corrupt file
-   *  throws — this module decides what a public room asserts, so it must not shrug. */
-  private readPhases(): Map<string, string> {
+  /** newest FRESH sidecar per assignee, as a structured overlay — the blocked flag travels as
+   *  a BOOLEAN, never re-derived from the rendered label. A corrupt file throws — this module
+   *  decides what a public room asserts, so it must not shrug. */
+  private readPhases(): Map<string, { text: string; blocked: boolean }> {
     const newestPerAgent = new Map<string, TaskPhaseFile>();
     for (const dir of this.options.phaseDirs) {
       let names: string[];
@@ -179,8 +183,13 @@ export class LiveStateSource implements StateSource {
         if (!held || Date.parse(file.updatedAt) > Date.parse(held.updatedAt)) newestPerAgent.set(file.assignee, file);
       }
     }
-    const overlays = new Map<string, string>();
-    for (const [agent, f] of newestPerAgent) overlays.set(agent, `task#${f.taskId} ${f.phase}${f.reason ? ` (${f.reason})` : ""}`);
+    const overlays = new Map<string, { text: string; blocked: boolean }>();
+    for (const [agent, f] of newestPerAgent) {
+      overlays.set(agent, {
+        text: `task#${f.taskId} ${f.phase}${f.reason ? ` (${f.reason})` : ""}`,
+        blocked: f.phase === "blocked_external",
+      });
+    }
     return overlays;
   }
 }
