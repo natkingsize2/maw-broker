@@ -25,8 +25,14 @@ export class DurableStore {
   finishAttempt(messageId: string) { DurableStore.activeAttempts.delete(this.attemptKey(messageId)); }
 
   audit(record: AuditRecord) {
-    this.withLock(()=>{ let fd:number|undefined; try { try { fd=openSync(this.auditPath, constants.O_WRONLY|constants.O_APPEND|constants.O_CREAT|constants.O_NONBLOCK|((constants as any).O_NOFOLLOW??0),0o600); } catch { throw new Error("unsafe audit file"); } const st=fstatSync(fd); if(!st.isFile()||st.nlink!==1) throw new Error("unsafe audit file"); const raw=readFileSync(this.auditPath,"utf8"); const count=raw.split("\n").filter(Boolean).length; if(count>=DurableStore.MAX_AUDIT_RECORDS) throw new Error("audit capacity exceeded"); const prior=raw.split("\n").filter(Boolean).at(-1)??""; const hash=cryptoHash(prior+JSON.stringify(record)); const line=`${JSON.stringify({...record, prevHash:prior?cryptoHash(prior):null, hash})}\n`; fchmodSync(fd,0o600); writeFileSync(fd,line,"utf8"); fsyncSync(fd); } finally { if(fd!==undefined) closeSync(fd); } });
+    this.withLock(()=>{ let fd:number|undefined; try { try { fd=this.openAuditFd(); } catch { throw new Error("unsafe audit file"); } const st=fstatSync(fd); if(!st.isFile()||st.nlink!==1) throw new Error("unsafe audit file"); const raw=readFileSync(this.auditPath,"utf8"); const count=raw.split("\n").filter(Boolean).length;
+      // At capacity the chain ROTATES instead of throwing: a permanent route must never wedge
+      // on its own audit. The full file is archived (append-only, never deleted) and the next
+      // record's prevHash still points at the archived tail, so the chain verifies across files.
+      if(count>=DurableStore.MAX_AUDIT_RECORDS) { closeSync(fd); fd=undefined; const archive=this.auditPath.replace(/\.jsonl$/,"")+`-${Date.now()}.jsonl`; renameSync(this.auditPath,archive); try { fd=this.openAuditFd(); } catch { throw new Error("unsafe audit file"); } const rotated=fstatSync(fd); if(!rotated.isFile()||rotated.nlink!==1) throw new Error("unsafe audit file"); }
+      const prior=raw.split("\n").filter(Boolean).at(-1)??""; const hash=cryptoHash(prior+JSON.stringify(record)); const line=`${JSON.stringify({...record, prevHash:prior?cryptoHash(prior):null, hash})}\n`; fchmodSync(fd,0o600); writeFileSync(fd,line,"utf8"); fsyncSync(fd); } finally { if(fd!==undefined) closeSync(fd); } });
   }
+  private openAuditFd(): number { return openSync(this.auditPath, constants.O_WRONLY|constants.O_APPEND|constants.O_CREAT|constants.O_NONBLOCK|((constants as any).O_NOFOLLOW??0),0o600); }
 
   markResolved(messageId: string) {
     this.withLock(()=>{ const current=this.readStates(); current[messageId]="resolved"; this.writeStates(current); this.states=new Map(Object.entries(current) as any); }); this.finishAttempt(messageId);

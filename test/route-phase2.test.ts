@@ -165,3 +165,29 @@ test("injector failure keeps record pending and holds cursor end-to-end", async 
   expect(existsSync(join(f.root, "cursor.json"))).toBe(false);
   f.run.close();
 });
+
+// ── Audit cap: rotation instead of wedge, chain continuity across files
+test("audit at capacity rotates the file and keeps the hash chain across rotation", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-p2-rotate-"));
+  const store = new DurableStore(join(root, "store"));
+  writeFileSync(store.auditPath, Array.from({ length: 400 }, (_, i) => `line-${i}`).join("\n") + "\n", { mode: 0o600 });
+  store.audit({ at: new Date().toISOString(), event: "ignored", messageId: "1", route: "r" });
+  const { readdirSync } = require("node:fs") as typeof import("node:fs");
+  const files = readdirSync(join(root, "store")).filter((f: string) => f.startsWith("audit"));
+  expect(files.length).toBe(2);
+  const fresh = readFileSync(store.auditPath, "utf8").trim().split("\n");
+  expect(fresh.length).toBe(1);
+  const record = JSON.parse(fresh[0]!);
+  const { createHash } = require("node:crypto") as typeof import("node:crypto");
+  expect(record.prevHash).toBe(createHash("sha256").update("line-399").digest("hex"));
+  const archived = files.find((f: string) => f !== "audit.jsonl")!;
+  expect(readFileSync(join(root, "store", archived), "utf8").trim().split("\n").length).toBe(400);
+});
+test("audit below capacity appends to the same file", () => {
+  const root = mkdtempSync(join(tmpdir(), "maw-p2-norotate-"));
+  const store = new DurableStore(join(root, "store"));
+  store.audit({ at: new Date().toISOString(), event: "ignored", messageId: "1", route: "r" });
+  store.audit({ at: new Date().toISOString(), event: "ignored", messageId: "2", route: "r" });
+  const { readdirSync } = require("node:fs") as typeof import("node:fs");
+  expect(readdirSync(join(root, "store")).filter((f: string) => f.startsWith("audit")).length).toBe(1);
+});
