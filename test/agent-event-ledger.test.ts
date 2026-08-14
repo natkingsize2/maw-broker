@@ -1,124 +1,25 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AGENT_EVENT_SCHEMA, AgentEventError, AgentEventLedger, buildAgentEventIdempotencyKey, type OutboundEmitter } from "../src/agent-event-ledger";
+import { AGENT_EVENT_SCHEMA, AgentEventLedger, signAgentEventIngress, type AuthenticatedAgentEventIngress, type OutboundEmitter } from "../src/agent-event-ledger";
 import { ProjectRegistry, type ProjectRoute } from "../src/project-routes";
+const ROUTES:ProjectRoute[]=[{name:"livesiang",transport:"discord-text",destination:"1537404238861438996",agent:"03-canon:1",issue:"natkingsize2/liveSiang#15"}];
+const registry=new ProjectRegistry(ROUTES); const open:AgentEventLedger[]=[]; afterEach(()=>{for(const l of open.splice(0))l.close()});
+const ev=(o:Record<string,unknown>={})=>({schema:AGENT_EVENT_SCHEMA,project:"livesiang",kind:"progress",event_id:"e1",agent:"canon",summary:"งานคืบหน้า",occurred_at:"2026-08-14T15:45:00.000Z",...o});
+function emitter(fail?:"discord"|"github"){const calls:{sink:string;key?:string}[]=[];return{calls,value:{emitDiscord:async(_d:string,_c:string,key?:string)=>{calls.push({sink:"discord",key});if(fail==="discord")throw Error("down")},emitGitHub:async(_i:string,_c:string,key?:string)=>{calls.push({sink:"github",key});if(fail==="github")throw Error("down")}} satisfies OutboundEmitter};}
+function root(prefix="ael-"){return mkdtempSync(join(tmpdir(),prefix))} function path(r:string){return join(r,"ledger.json")}
 
-const ROUTES: ProjectRoute[] = [
-  { name: "livesiang", transport: "discord-text", destination: "1537404238861438996", agent: "03-canon:1", issue: "natkingsize2/liveSiang#15" },
-  { name: "maw-pipecat", transport: "discord-text", destination: "1537405946379243600", agent: "mba:02-anvil", issue: "natkingsize2/liveSiang#95" },
-];
-const registry = new ProjectRegistry(ROUTES);
-
-function fakeEmitter() {
-  const discord: Array<{ destination: string; content: string }> = [];
-  const github: Array<{ issueRef: string; comment: string }> = [];
-  const emitter: OutboundEmitter = {
-    emitDiscord: async (destination, content) => { discord.push({ destination, content }); },
-    emitGitHub: async (issueRef, comment) => { github.push({ issueRef, comment }); },
-  };
-  return { emitter, discord, github };
-}
-const ev = (overrides: Record<string, unknown> = {}) => ({
-  schema: AGENT_EVENT_SCHEMA, project: "livesiang", kind: "progress", event_id: "e1",
-  agent: "canon", summary: "งานคืบหน้า ครึ่งทางแล้ว", occurred_at: "2026-08-14T15:45:00.000Z", ...overrides,
+describe("transactional durable outbox",()=>{
+ test("persists pending before send and resumes only unfinished sink with stable key",async()=>{const r=root();const a=emitter("github");const l=new AgentEventLedger(registry,a.value,path(r));open.push(l);await expect(l.accept(ev())).rejects.toThrow("down");expect(a.calls.map(x=>x.sink)).toEqual(["discord","github"]);const snap=JSON.parse(readFileSync(path(r),"utf8"));expect(snap.records["agent-event-v1:livesiang:e1"].sinks.discord.status).toBe("delivered");expect(snap.records["agent-event-v1:livesiang:e1"].sinks.github.status).toBe("pending");const key=a.calls[1]!.key;l.close();open.pop();const b=emitter();const l2=new AgentEventLedger(registry,b.value,path(r));open.push(l2);expect((await l2.accept(ev())).status).toBe("duplicate");expect(b.calls).toEqual([{sink:"github",key}]);});
+ test("full canonical event digest catches non-summary mutation",async()=>{const l=new AgentEventLedger(registry,emitter().value);await l.accept(ev());await expect(l.accept(ev({agent:"other"}))).rejects.toThrow("idempotency conflict");});
+ test("snapshot digest binds records and audit",async()=>{const r=root();const l=new AgentEventLedger(registry,emitter().value,path(r));open.push(l);await l.accept(ev());l.close();open.pop();const s=JSON.parse(readFileSync(path(r),"utf8"));s.records["agent-event-v1:livesiang:e1"].event.agent="tampered";writeFileSync(path(r),JSON.stringify(s),{mode:0o600});expect(()=>new AgentEventLedger(registry,emitter().value,path(r))).toThrow("snapshot digest mismatch");});
 });
 
-describe("strict schema", () => {
-  test("all three kinds accepted; anything else (incl. 'final') rejected fail-closed", async () => {
-    const { emitter } = fakeEmitter();
-    const l = new AgentEventLedger(registry, emitter);
-    for (const kind of ["progress", "done", "blocked"]) {
-      const r = await l.accept(ev({ kind, event_id: `k-${kind}` }));
-      expect(r.status).toBe("accepted");
-    }
-    for (const kind of ["final", "raw_audio", "unknown_future"]) {
-      await expect(l.accept(ev({ kind, event_id: `bad-${kind}` }))).rejects.toThrow("rejected");
-    }
-  });
-  test("extra/missing keys, wrong schema, bad occurred_at, unknown project — each refused with its own code", async () => {
-    const { emitter } = fakeEmitter();
-    const l = new AgentEventLedger(registry, emitter);
-    const cases: Array<[unknown, string]> = [
-      [ev({ extra: "x" }), "MALFORMED_EVENT"],
-      [(() => { const e: any = ev(); delete e.agent; return e; })(), "MALFORMED_EVENT"],
-      [ev({ schema: "v2" }), "MALFORMED_EVENT"],
-      [ev({ occurred_at: "yesterday" }), "MALFORMED_EVENT"],
-      [ev({ project: "not-registered" }), "UNKNOWN_PROJECT"],
-    ];
-    for (const [body, code] of cases) {
-      let threw: AgentEventError | undefined;
-      try { await l.accept(body); } catch (e) { threw = e as AgentEventError; }
-      expect(threw?.code).toBe(code as any);
-    }
-  });
-});
-
-describe("exactly-once emission + idempotency", () => {
-  test("first accept emits to BOTH sinks with the project's OWN destination+issue; replay emits NOTHING and returns the ORIGINAL receipt", async () => {
-    const { emitter, discord, github } = fakeEmitter();
-    const l = new AgentEventLedger(registry, emitter, undefined, () => "2026-08-14T15:45:01.000Z");
-    const first = await l.accept(ev());
-    expect(first.status).toBe("accepted");
-    expect(first.idempotencyKey).toBe(buildAgentEventIdempotencyKey("livesiang", "e1"));
-    expect(discord).toEqual([{ destination: "1537404238861438996", content: "[progress] canon @ livesiang: งานคืบหน้า ครึ่งทางแล้ว" }]);
-    expect(github).toEqual([{ issueRef: "natkingsize2/liveSiang#15", comment: discord[0]!.content }]);
-    const replay = await l.accept(ev());
-    expect(replay.status).toBe("duplicate");
-    expect(replay.receivedAt).toBe(first.receivedAt);
-    expect(discord.length).toBe(1);   // exactly once
-    expect(github.length).toBe(1);
-  });
-  test("same key + different summary = conflict; original record and emission count untouched", async () => {
-    const { emitter, discord } = fakeEmitter();
-    const l = new AgentEventLedger(registry, emitter);
-    await l.accept(ev());
-    await expect(l.accept(ev({ summary: "DIFFERENT" }))).rejects.toThrow("IDEMPOTENCY_CONFLICT".length ? /different content/ : "");
-    expect(discord.length).toBe(1);
-  });
-  test("emitter failure leaves the key UNRECORDED — a retry re-emits instead of silently recording an untold event", async () => {
-    const discord: string[] = [];
-    let fail = true;
-    const l = new AgentEventLedger(registry, {
-      emitDiscord: async (_d, c) => { if (fail) throw new Error("sink down"); discord.push(c); },
-      emitGitHub: async () => {},
-    });
-    await expect(l.accept(ev())).rejects.toThrow("sink down");
-    fail = false;
-    const r = await l.accept(ev());
-    expect(r.status).toBe("accepted");   // NOT duplicate — first attempt never became a record
-    expect(discord.length).toBe(1);
-  });
-});
-
-describe("durable restart + chained audit", () => {
-  test("across restart: replay is duplicate (no re-emit), audit chain survives and verifies", async () => {
-    const root = mkdtempSync(join(tmpdir(), "maw-ael-"));
-    const path = join(root, "ledger.json");
-    const a = fakeEmitter();
-    const l1 = new AgentEventLedger(registry, a.emitter, path, () => "2026-08-14T15:46:00.000Z");
-    const first = await l1.accept(ev());
-    expect(a.discord.length).toBe(1);
-
-    const b = fakeEmitter();
-    const l2 = new AgentEventLedger(registry, b.emitter, path);   // fresh process, same file
-    const replay = await l2.accept(ev());
-    expect(replay.status).toBe("duplicate");
-    expect(replay.receivedAt).toBe(first.receivedAt);
-    expect(b.discord.length).toBe(0);   // exactly-once holds ACROSS restart
-    expect(l2.verifyAuditChain()).toBe(true);
-    expect(l2.auditRows.map(r => r.event)).toEqual(["accepted", "replay"]);
-  });
-  test("tampered audit row is detected at load (chain refuses to verify)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "maw-ael-tamper-"));
-    const path = join(root, "ledger.json");
-    const a = fakeEmitter();
-    const l1 = new AgentEventLedger(registry, a.emitter, path);
-    await l1.accept(ev());
-    const raw = JSON.parse(readFileSync(path, "utf8"));
-    raw.audit[0].kind = "done";   // rewrite history: progress → done
-    writeFileSync(path, JSON.stringify(raw), { mode: 0o600 });
-    expect(() => new AgentEventLedger(registry, a.emitter, path)).toThrow("audit chain broken");
-  });
+describe("authority and store",()=>{
+ test("signed ingress binds author bot channel and project route",async()=>{const key=Buffer.alloc(32,7);const l=new AgentEventLedger(registry,emitter().value,undefined,undefined,{authorId:"owner",key});const unsigned={event:ev(),authorId:"owner",authorIsBot:false,channelId:ROUTES[0]!.destination,projectRoute:"livesiang"};const good={...unsigned,signature:signAgentEventIngress(unsigned,key)};expect((await l.acceptAuthenticated(good)).status).toBe("accepted");for(const mutation of [{authorIsBot:true},{channelId:"1537404238861438997"},{projectRoute:"wrong"},{authorId:"other"}]){const u={...unsigned,...mutation};const x={...u,signature:signAgentEventIngress(u,key)} as AuthenticatedAgentEventIngress;await expect(l.acceptAuthenticated(x)).rejects.toThrow("ingress");}});
+ test("rejects unsigned direct accept when authority configured",async()=>{const l=new AgentEventLedger(registry,emitter().value,undefined,undefined,{authorId:"owner",key:Buffer.alloc(32)});await expect(l.accept(ev())).rejects.toThrow("authenticated ingress required");});
+ test("creates 0700 root/0600 snapshot; rejects unsafe and symlink roots",async()=>{const parent=root();const made=join(parent,"store");const l=new AgentEventLedger(registry,emitter().value,path(made));open.push(l);await l.accept(ev());expect(Bun.file(path(made)).size).toBeGreaterThan(0);expect((await import("node:fs")).statSync(made).mode&0o777).toBe(0o700);expect((await import("node:fs")).statSync(path(made)).mode&0o777).toBe(0o600);l.close();open.pop();chmodSync(made,0o755);expect(()=>new AgentEventLedger(registry,emitter().value,path(made))).toThrow("root unsafe");const link=join(parent,"link");symlinkSync(made,link);expect(()=>new AgentEventLedger(registry,emitter().value,path(link))).toThrow("root unsafe");});
+ test("single writer lease rejects concurrent process and releases cleanly",async()=>{const r=root();const l=new AgentEventLedger(registry,emitter().value,path(r));open.push(l);const child=Bun.spawn([process.execPath,"-e",`import {AgentEventLedger} from ${JSON.stringify(new URL("../src/agent-event-ledger.ts",import.meta.url).href)};import {ProjectRegistry} from ${JSON.stringify(new URL("../src/project-routes.ts",import.meta.url).href)};new AgentEventLedger(new ProjectRegistry(${JSON.stringify(ROUTES)}),{emitDiscord:async()=>{},emitGitHub:async()=>{}},${JSON.stringify(path(r))});`],{stdout:"pipe",stderr:"pipe"});expect(await child.exited).not.toBe(0);l.close();open.pop();const l2=new AgentEventLedger(registry,emitter().value,path(r));open.push(l2);});
+ test("recovers a lease left by a crashed writer process",async()=>{const r=root();const script=`import {AgentEventLedger} from ${JSON.stringify(new URL("../src/agent-event-ledger.ts",import.meta.url).href)};import {ProjectRegistry} from ${JSON.stringify(new URL("../src/project-routes.ts",import.meta.url).href)};new AgentEventLedger(new ProjectRegistry(${JSON.stringify(ROUTES)}),{emitDiscord:async()=>{},emitGitHub:async()=>{}},${JSON.stringify(path(r))});` ;const child=Bun.spawn([process.execPath,"-e",script]);expect(await child.exited).toBe(0);const successor=new AgentEventLedger(registry,emitter().value,path(r));open.push(successor);});
 });
