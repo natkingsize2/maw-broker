@@ -28,7 +28,8 @@ const servers: Array<{ stop(): void }> = [];
 afterEach(() => { while (servers.length) servers.pop()!.stop(); });
 
 const route = { name: "livesiang", transport: "discord-text" as const, destination: "1537404238861438996", agent: "03-canon:1", issue: "natkingsize2/liveSiang#15" };
-const env = { MAW_AGENT_EVENT_HTTP_TOKEN: "A".repeat(32), MAW_AGENT_EVENT_AUTHOR_ID: "1056224550129508415", MAW_AGENT_EVENT_INGRESS_KEY_B64: Buffer.alloc(32, 1).toString("base64"), MAW_AGENT_EVENT_STORE_KEY_B64: Buffer.alloc(32, 2).toString("base64") };
+const key = (start: number) => Buffer.from(Array.from({ length: 32 }, (_, i) => start + i)).toString("base64");
+const env = { MAW_AGENT_EVENT_HTTP_TOKEN: "A".repeat(32), MAW_AGENT_EVENT_AUTHOR_ID: "1056224550129508415", MAW_AGENT_EVENT_INGRESS_KEY_B64: key(1), MAW_AGENT_EVENT_STORE_KEY_B64: key(65) };
 const config = loadAgentEventDaemonConfig(env);
 const registry = () => new ProjectRegistry([route]);
 // realpathSync matters here: on macOS, os.tmpdir()'s ancestry runs through /var, which is
@@ -56,7 +57,7 @@ function fakeEmitter(calls: string[] = []): OutboundEmitter {
 
 function signedEvent(eventId: string, messageId: string, timestamp = "2026-08-14T15:45:00.000Z") {
   return signTrustedDiscordRow(
-    { authorId: config.authority.authorId, authorIsBot: false, channelId: route.destination, projectRoute: route.name, messageId, timestamp, event: { schema: AGENT_EVENT_SCHEMA, project: route.name, kind: "done", event_id: eventId, agent: "canon", summary: "done", occurred_at: timestamp } },
+    { authorId: config.authority.authorId, authorIsBot: false, webhookId: null, channelId: route.destination, projectRoute: route.name, messageId, timestamp, event: { schema: AGENT_EVENT_SCHEMA, project: route.name, kind: "done", event_id: eventId, agent: "canon", summary: "done", occurred_at: timestamp } },
     config.authority,
   );
 }
@@ -85,7 +86,7 @@ describe("agent-event-server — refuses to bind outside 127.0.0.1", () => {
 });
 
 describe("agent-event-server — real local HTTP round trip", () => {
-  test("accepted then nonce-replay-rejected over real HTTP", async () => {
+  test("accepted then identical nonce replay returns durable duplicate over real HTTP", async () => {
     const calls: string[] = [];
     const server = startAgentEventServer({ port: 19232, registry: registry(), emitter: fakeEmitter(calls), storePath: storeAt("ae-"), config, now: () => NOW });
     servers.push(server);
@@ -93,7 +94,8 @@ describe("agent-event-server — real local HTTP round trip", () => {
     const first = await post(19232, signed);
     expect(first.status).toBe(202);
     const second = await post(19232, signed); // same nonce -> replay
-    expect(second.status).toBe(400);
+    expect(second.status).toBe(200);
+    expect((await second.json()).status).toBe("duplicate");
     expect(calls).toEqual(["d", "g"]);
   });
 

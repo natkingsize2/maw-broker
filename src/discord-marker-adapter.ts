@@ -1,5 +1,6 @@
 import { DiscordTextAdapter } from "./adapter-discord";
 import type { InboundMessage } from "./types";
+import type { OutboundEmitter } from "./agent-event-ledger";
 
 /** Discord authoritative-marker adapter (C2 ROUND3).
  *
@@ -103,4 +104,19 @@ export class DiscordAuthoritativeMarkerAdapter {
       throw error; // lookup says nothing landed → the POST genuinely failed
     }
   }
+}
+
+/** Mechanical ledger seam: the ledger owns the per-event marker, while the authoritative
+ * adapter deliberately owns one marker. Constructing a short-lived adapter per operation
+ * preserves both contracts and keeps all lookup/post decisions in the reviewed adapter. */
+export function discordMarkerEmitter(port: MarkerClientPort, selfBotId: string): Pick<OutboundEmitter, "emitDiscord" | "hasDiscord"> {
+  return {
+    async hasDiscord(destination, idempotencyKey) {
+      return (await new DiscordAuthoritativeMarkerAdapter(port, { channelId: destination, selfBotId, marker: idempotencyKey }).findAuthoritative()) !== undefined;
+    },
+    async emitDiscord(destination, content, idempotencyKey) {
+      if (!idempotencyKey) throw new Error("discord marker idempotency key required");
+      await new DiscordAuthoritativeMarkerAdapter(port, { channelId: destination, selfBotId, marker: idempotencyKey }).ensureAuthoritative(content);
+    },
+  };
 }

@@ -19,8 +19,14 @@
 import { AgentEventDaemon, AgentEventLedger, type OutboundEmitter } from "./agent-event-ledger";
 import { AgentEventHttpIngress, type AgentEventDaemonConfig } from "./agent-event-daemon";
 import type { ProjectRegistry } from "./project-routes";
+import { discordMarkerEmitter, type MarkerClientPort } from "./discord-marker-adapter";
+import { githubMarkerEmitter, type GitHubRestClient } from "./adapter-github";
 
 const LOOPBACK_ONLY = "127.0.0.1";
+
+export function composeAgentEventEmitter(discordPort: MarkerClientPort, discordSelfId: string, githubClient: GitHubRestClient): OutboundEmitter {
+  return { ...discordMarkerEmitter(discordPort, discordSelfId), ...githubMarkerEmitter(githubClient) };
+}
 
 export type AgentEventServerOptions = {
   port: number;
