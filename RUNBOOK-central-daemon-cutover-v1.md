@@ -75,7 +75,11 @@ Run BEFORE touching anything. Every check below is a read, nothing here mutates 
    ```bash
    bun -e 'import("<worktree>/src/project-routes").then(m => { m.loadProjectRoutesFile(process.argv[1]); console.log("loads clean"); })' "$LIVE_ROUTES_PATH"
    ```
-   If this throws, **stop** — the live config is not yet compatible with the code being cut to
+   **Executable form (added 2026-08-14): `bun src/cutover-preflight.ts [path]`** — exit 0 =
+   loads clean (prints "read N routes", the denominator); exit 1 = rejected (incl. lingering
+   `mqtt` fields) with the loader's own named error; exit 2 = file missing. Uses the REAL
+   `loadProjectRoutesFile`, so it cannot drift from daemon startup behavior.
+   If this fails, **stop** — the live config is not yet compatible with the code being cut to
    (this was true as of the dossier: 2/4 routes still carried `mqtt`). Fixing the config is a
    precondition of this runbook, not a step inside it — it is a separate, explicit, human
    decision about editing live state.
@@ -106,7 +110,15 @@ can't create a second owner; this proves nothing else DID by some other path (a 
 
 ## Phase 2 — One broker final-event receiver
 
-**Known gap, stated plainly:** `final-event-contract.ts` does not use a `PersistentLease`
+**GAP CLOSED (2026-08-14 11:4x, owner-directed):** `startFinalEventServer` now acquires a
+`PersistentLease` on `leaseRoot` BEFORE binding — the real daemon path (`main()`) always passes
+the store root, so a second receiver on the same store is refused at construction even on a
+different port ("the port is not the shared resource, the store is"). Proven by
+`test/cutover-blockers.test.ts`. Supervisor single-instance policy (below) remains as
+defense-in-depth, no longer the only enforcement. The paragraph below is retained as the
+historical record of the gap:
+
+~~**Known gap, stated plainly:**~~ `final-event-contract.ts` does not use a `PersistentLease`
 (recorded as a deliberate scope limit in `SPEC-final-event-receipt-v1.md` §Rollback — "today's
 scope is a single receiver for a single pipeline"). Enforcement of "one receiver" is therefore
 **supervisor-level, not code-level**, for this daemon specifically — unlike the bridge, mirror,
@@ -275,3 +287,14 @@ Ran 4 tests across 1 file. [22.00ms]
 Full suite at the commit this runbook ships with: **256 pass, 0 fail, 560 asserts, 20 files**,
 `tsc --noEmit` clean (up from 252 before the dry-run test file; +4 tests/+28 asserts for this
 file specifically, the rest already existed from the reviewed branches this runbook cuts over).
+
+
+## Amendment log — archive/rollback for post-f960470 changes
+
+- **2026-08-14 11:4x** (this commit): final-event lease (Phase 2 gap closed) + executable
+  Phase 0.5 preflight (`src/cutover-preflight.ts`) + 7 tests (`test/cutover-blockers.test.ts`).
+  **Archive**: the pre-change state is exactly commit `f960470e58036d4fe551d901f93cb11b93667689`
+  on this same branch — `git archive f960470e...` reproduces it byte-for-byte; no separate
+  tarball needed for a clean committed tree. **Rollback**: `git checkout f960470e...` (or revert
+  this commit). No durable-store format changed; a rollback needs no store migration. Nothing
+  here creates secrets, edits live routes, starts daemons, or touches Discord/token config.

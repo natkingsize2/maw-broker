@@ -5,6 +5,7 @@
  * `runner.ts`: this contract has nothing to do with Discord.
  */
 import { FinalEventError, handleFinalEvent, type FinalEventSecrets, type FinalEventStore } from "./final-event-contract";
+import { PersistentLease } from "./runner";
 
 const LOOPBACK_ONLY = "127.0.0.1";
 
@@ -13,6 +14,15 @@ export type FinalEventServerOptions = {
   hostname?: string;
   store: FinalEventStore;
   secrets: FinalEventSecrets;
+  /** When set, a PersistentLease is acquired on this directory BEFORE the
+   *  server binds — a second receiver on the same lease root is refused at
+   *  construction (closes the SPEC's documented "no lease" gap; same
+   *  cross-process single-writer mechanism BrokerRunner/MirrorService use).
+   *  `PersistentLease` holds no credential of any kind, so importing it from
+   *  runner.ts keeps this module's no-Discord-credential property intact.
+   *  Optional so unit tests exercising only HTTP semantics stay lease-free;
+   *  main() ALWAYS passes the store root. */
+  leaseRoot?: string;
 };
 
 const STATUS_FOR_CODE: Record<string, number> = {
@@ -30,9 +40,13 @@ const STATUS_FOR_CODE: Record<string, number> = {
 export function startFinalEventServer(options: FinalEventServerOptions) {
   const hostname = options.hostname ?? LOOPBACK_ONLY;
   if (hostname !== LOOPBACK_ONLY) throw new Error("final-event server refuses to bind outside 127.0.0.1");
+  // Lease FIRST, before the port bind: two receivers on different ports but
+  // the same store would otherwise both accept — the port is not the shared
+  // resource, the store is.
+  const lease = options.leaseRoot !== undefined ? new PersistentLease(options.leaseRoot) : undefined;
   const startedAt = new Date().toISOString();
 
-  return Bun.serve({
+  const server = Bun.serve({
     port: options.port,
     hostname,
     async fetch(req: Request): Promise<Response> {
@@ -57,6 +71,12 @@ export function startFinalEventServer(options: FinalEventServerOptions) {
       }
     },
   });
+  // Wrapper so stop() also releases the lease — same shape existing callers
+  // (tests, FakeSupervisor) already use: a handle with stop(closeActive?).
+  return {
+    port: server.port,
+    stop(closeActiveConnections?: boolean) { try { lease?.release(); } finally { server.stop(closeActiveConnections); } },
+  };
 }
 
 if (import.meta.main) {
@@ -66,7 +86,9 @@ if (import.meta.main) {
   if (!storeRoot) throw new Error("final-event receipt configuration invalid");
   const secrets = loadFinalEventSecrets();
   const store = new FileFinalEventStore(`${storeRoot}/final-event-store.json`);
-  const server = startFinalEventServer({ port, store, secrets });
+  // leaseRoot is NOT optional on the real daemon path — single receiver per
+  // store is enforced by construction, not by supervisor configuration alone.
+  const server = startFinalEventServer({ port, store, secrets, leaseRoot: storeRoot });
   const stop = () => { server.stop(); process.exit(0); };
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
   console.log(`final-event receipt listening on 127.0.0.1:${port}`);
