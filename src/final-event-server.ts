@@ -14,15 +14,14 @@ export type FinalEventServerOptions = {
   hostname?: string;
   store: FinalEventStore;
   secrets: FinalEventSecrets;
-  /** When set, a PersistentLease is acquired on this directory BEFORE the
-   *  server binds — a second receiver on the same lease root is refused at
-   *  construction (closes the SPEC's documented "no lease" gap; same
-   *  cross-process single-writer mechanism BrokerRunner/MirrorService use).
-   *  `PersistentLease` holds no credential of any kind, so importing it from
-   *  runner.ts keeps this module's no-Discord-credential property intact.
-   *  Optional so unit tests exercising only HTTP semantics stay lease-free;
-   *  main() ALWAYS passes the store root. */
-  leaseRoot?: string;
+  /** REQUIRED (review 173ed9e-r1): a PersistentLease is acquired on this
+   *  directory BEFORE the server binds — a second receiver on the same lease
+   *  root is refused at construction (same cross-process single-writer
+   *  mechanism BrokerRunner/MirrorService use). `PersistentLease` holds no
+   *  credential, so this module's no-Discord-credential property is intact.
+   *  Required rather than optional so no caller — test or production — can
+   *  construct a lease-less receiver by omission. */
+  leaseRoot: string;
 };
 
 const STATUS_FOR_CODE: Record<string, number> = {
@@ -43,10 +42,13 @@ export function startFinalEventServer(options: FinalEventServerOptions) {
   // Lease FIRST, before the port bind: two receivers on different ports but
   // the same store would otherwise both accept — the port is not the shared
   // resource, the store is.
-  const lease = options.leaseRoot !== undefined ? new PersistentLease(options.leaseRoot) : undefined;
+  if (!options.leaseRoot) throw new Error("final-event receipt configuration invalid: leaseRoot required");
+  const lease = new PersistentLease(options.leaseRoot);
   const startedAt = new Date().toISOString();
 
-  const server = Bun.serve({
+  let server: ReturnType<typeof Bun.serve>;
+  try {
+    server = Bun.serve({
     port: options.port,
     hostname,
     async fetch(req: Request): Promise<Response> {
@@ -70,12 +72,22 @@ export function startFinalEventServer(options: FinalEventServerOptions) {
         return new Response(JSON.stringify({ error: "INTERNAL" }), { status: 500 });
       }
     },
-  });
-  // Wrapper so stop() also releases the lease — same shape existing callers
-  // (tests, FakeSupervisor) already use: a handle with stop(closeActive?).
+    });
+  } catch (error) {
+    // Bind/start failed (e.g. port in use): the lease must not outlive the
+    // server that never existed — release immediately so a successor can
+    // reacquire without waiting out the stale-heartbeat window (review r1 #1).
+    lease.release();
+    throw error;
+  }
+  // stop(): listener FIRST, lease SECOND (review r1 #2). Releasing the lease
+  // while the old listener still accepts would let a successor acquire the
+  // lease and bind a new port while requests can still reach the old process
+  // — two live receivers for one store, the exact state the lease exists to
+  // prevent. Stopping the listener first closes that window.
   return {
     port: server.port,
-    stop(closeActiveConnections?: boolean) { try { lease?.release(); } finally { server.stop(closeActiveConnections); } },
+    stop(closeActiveConnections?: boolean) { try { server.stop(closeActiveConnections); } finally { lease.release(); } },
   };
 }
 

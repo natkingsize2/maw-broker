@@ -33,7 +33,7 @@ async function post(port: number, body: unknown, token = SECRETS.authorizedToken
 describe("final-event-server — /health (loopback receiver check, no auth required)", () => {
   test("GET /health returns ok + pid + startedAt without any Authorization header", async () => {
     const port = 18830;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     const res = await fetch(`http://127.0.0.1:${port}/health`);
     expect(res.status).toBe(200);
@@ -47,7 +47,7 @@ describe("final-event-server — /health (loopback receiver check, no auth requi
 describe("final-event-server — real local HTTP round trip", () => {
   test("accepted then duplicate over real HTTP, in-memory store", async () => {
     const port = 18811;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     const first = await post(port, goodBody());
     expect(first.status).toBe(200);
@@ -63,7 +63,7 @@ describe("final-event-server — real local HTTP round trip", () => {
 
   test("conflict over real HTTP returns 409", async () => {
     const port = 18812;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     await post(port, goodBody());
     const differentContent: LiveSiangFinalEventContent = { ...content, final_text: "DIFFERENT TEXT ENTIRELY" };
@@ -75,7 +75,7 @@ describe("final-event-server — real local HTTP round trip", () => {
 
   test("missing auth ⇒ 401, wrong auth ⇒ 401", async () => {
     const port = 18813;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     const missing = await post(port, goodBody(), "");
     expect(missing.status).toBe(401);
@@ -85,7 +85,7 @@ describe("final-event-server — real local HTTP round trip", () => {
 
   test("wrong route ⇒ 400 UNKNOWN_ROUTE", async () => {
     const port = 18814;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     const res = await post(port, goodBody({ route: "livesiang" }));
     expect(res.status).toBe(400);
@@ -94,7 +94,7 @@ describe("final-event-server — real local HTTP round trip", () => {
 
   test("each rejected kind (raw_audio, partial, assistant_tts) ⇒ 400 KIND_REJECTED over real HTTP", async () => {
     const port = 18815;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     for (const kind of ["raw_audio", "partial", "assistant_tts"]) {
       const res = await post(port, goodBody({ kind, idempotencyKey: `idem-${kind}` }));
@@ -105,7 +105,7 @@ describe("final-event-server — real local HTTP round trip", () => {
 
   test("malformed JSON body ⇒ 400", async () => {
     const port = 18816;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     const res = await fetch(`http://127.0.0.1:${port}/final-event`, { method: "POST", headers: { Authorization: `Bearer ${SECRETS.authorizedToken}`, "Content-Type": "application/json" }, body: "{not json" });
     expect(res.status).toBe(400);
@@ -113,7 +113,7 @@ describe("final-event-server — real local HTTP round trip", () => {
 
   test("digest mismatch ⇒ 400 DIGEST_MISMATCH", async () => {
     const port = 18817;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     const res = await post(port, goodBody({ contentDigest: computeContentDigest({ turnId: "different" }) }));
     expect(res.status).toBe(400);
@@ -122,7 +122,7 @@ describe("final-event-server — real local HTTP round trip", () => {
 
   test("unknown path ⇒ 404, GET method ⇒ 404", async () => {
     const port = 18818;
-    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS });
+    const server = startFinalEventServer({ port, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server);
     const badPath = await fetch(`http://127.0.0.1:${port}/not-a-real-path`, { method: "POST", headers: { Authorization: `Bearer ${SECRETS.authorizedToken}` }, body: "{}" });
     expect(badPath.status).toBe(404);
@@ -131,7 +131,7 @@ describe("final-event-server — real local HTTP round trip", () => {
   });
 
   test("refuses to bind outside 127.0.0.1", () => {
-    expect(() => startFinalEventServer({ port: 18819, hostname: "0.0.0.0", store: new InMemoryFinalEventStore(), secrets: SECRETS })).toThrow("refuses to bind outside 127.0.0.1");
+    expect(() => startFinalEventServer({ port: 18819, hostname: "0.0.0.0", store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) })).toThrow("refuses to bind outside 127.0.0.1");
   });
 });
 
@@ -141,13 +141,13 @@ describe("final-event-server + FileFinalEventStore — durable across a real res
     const storePath = join(root, "final-event-store.json");
 
     const port = 18820;
-    const server1 = startFinalEventServer({ port, store: new FileFinalEventStore(storePath), secrets: SECRETS });
+    const server1 = startFinalEventServer({ port, store: new FileFinalEventStore(storePath), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     const first = await post(port, goodBody());
     expect((await first.json()).status).toBe("accepted");
     server1.stop(); // simulates process exit
 
     // "restart": a fresh FileFinalEventStore instance loading the SAME path, fresh server.
-    const server2 = startFinalEventServer({ port, store: new FileFinalEventStore(storePath), secrets: SECRETS });
+    const server2 = startFinalEventServer({ port, store: new FileFinalEventStore(storePath), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "fe-lr-")) });
     servers.push(server2);
     const second = await post(port, goodBody());
     expect((await second.json()).status).toBe("duplicate");

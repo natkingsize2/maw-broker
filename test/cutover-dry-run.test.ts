@@ -58,8 +58,8 @@ describe("FakeSupervisor — single-instance-per-label (Phase 1 / Phase 2 at the
   test("refuses to double-start the final-event label", () => {
     const root = mkdtempSync(join(tmpdir(), "maw-cutover-fe-"));
     const store = () => new FileFinalEventStore(join(root, "store.json"));
-    sup.start("final-event", () => startFinalEventServer({ port: 18903, store: store(), secrets: RECEIPT_SECRETS }));
-    expect(() => sup.start("final-event", () => startFinalEventServer({ port: 18904, store: store(), secrets: RECEIPT_SECRETS }))).toThrow('label "final-event" already running');
+    sup.start("final-event", () => startFinalEventServer({ port: 18903, store: store(), secrets: RECEIPT_SECRETS, leaseRoot: root }));
+    expect(() => sup.start("final-event", () => startFinalEventServer({ port: 18904, store: store(), secrets: RECEIPT_SECRETS, leaseRoot: root }))).toThrow('label "final-event" already running');
   });
   test("a stopped label can be started again (this IS the cutover's stop-old/start-new step)", () => {
     sup.start("bridge", () => startBridgeServer({ port: 18905, secrets: BRIDGE_SECRETS, fetcher: fakeDiscordFetcher }));
@@ -75,6 +75,7 @@ describe("Full cutover dry run — Phases 0-5 against real HTTP, fake supervisor
     const RECEIPT_PORT = 18911;
     const root = mkdtempSync(join(tmpdir(), "maw-cutover-e2e-"));
     const storePath = join(root, "final-event-store.json");
+    const feLeaseRoot = root; // ONE lease root across ALL cycles — every stop/start below re-proves acquire→release→reacquire (review r1 #4)
 
     // ── Phase 0 (partial): preflight — nothing running yet
     expect(sup.isRunning("bridge")).toBe(false);
@@ -84,7 +85,7 @@ describe("Full cutover dry run — Phases 0-5 against real HTTP, fake supervisor
 
     // ── "OLD" daemons — models what's already running in production before this cutover
     sup.start("bridge", () => startBridgeServer({ port: BRIDGE_PORT, secrets: BRIDGE_SECRETS, fetcher: fakeDiscordFetcher }));
-    sup.start("final-event", () => startFinalEventServer({ port: RECEIPT_PORT, store: new FileFinalEventStore(storePath), secrets: RECEIPT_SECRETS }));
+    sup.start("final-event", () => startFinalEventServer({ port: RECEIPT_PORT, store: new FileFinalEventStore(storePath), secrets: RECEIPT_SECRETS, leaseRoot: feLeaseRoot }));
 
     const bridgeHealthOld = await healthOf(BRIDGE_PORT);
     const receiptHealthOld = await healthOf(RECEIPT_PORT);
@@ -127,7 +128,7 @@ describe("Full cutover dry run — Phases 0-5 against real HTTP, fake supervisor
 
     // ── Cutover: start NEW, same ports, SAME store path
     sup.start("bridge", () => startBridgeServer({ port: BRIDGE_PORT, secrets: BRIDGE_SECRETS, fetcher: fakeDiscordFetcher }));
-    sup.start("final-event", () => startFinalEventServer({ port: RECEIPT_PORT, store: new FileFinalEventStore(storePath), secrets: RECEIPT_SECRETS }));
+    sup.start("final-event", () => startFinalEventServer({ port: RECEIPT_PORT, store: new FileFinalEventStore(storePath), secrets: RECEIPT_SECRETS, leaseRoot: feLeaseRoot }));
 
     const bridgeHealthNew = await healthOf(BRIDGE_PORT);
     const receiptHealthNew = await healthOf(RECEIPT_PORT);
@@ -150,7 +151,7 @@ describe("Full cutover dry run — Phases 0-5 against real HTTP, fake supervisor
     expect(readFileSync(storePath, "utf8")).toBe(storeBytesBeforeCutover); // still untouched — no accept/duplicate call writes a NEW record, only a first accept does
 
     sup.start("bridge", () => startBridgeServer({ port: BRIDGE_PORT, secrets: BRIDGE_SECRETS, fetcher: fakeDiscordFetcher }));
-    sup.start("final-event", () => startFinalEventServer({ port: RECEIPT_PORT, store: new FileFinalEventStore(storePath), secrets: RECEIPT_SECRETS }));
+    sup.start("final-event", () => startFinalEventServer({ port: RECEIPT_PORT, store: new FileFinalEventStore(storePath), secrets: RECEIPT_SECRETS, leaseRoot: feLeaseRoot }));
     expect((await healthOf(BRIDGE_PORT)).ok).toBe(true);
     expect((await healthOf(RECEIPT_PORT)).ok).toBe(true);
 

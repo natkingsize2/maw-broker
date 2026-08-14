@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startFinalEventServer } from "../src/final-event-server";
 import { InMemoryFinalEventStore, type FinalEventSecrets } from "../src/final-event-contract";
-import { runCutoverPreflight } from "../src/cutover-preflight";
+import { assertDistinctLeaseRoots, runCutoverPreflight } from "../src/cutover-preflight";
 
 /** Closes the two non-secret real-cutover blockers (owner 2026-08-14 11:39):
  *  (1) final-event receiver lease gap — now fail-closed at construction;
@@ -64,5 +64,54 @@ describe("cutover preflight (blocker 1 made executable)", () => {
   test("wrong mode (0644) → exit 1 (loader's own perms guard fires through the preflight)", () => {
     const r = runCutoverPreflight(write(CLEAN, 0o644));
     expect(r.code).toBe(1);
+  });
+});
+
+describe("review r1 — lease lifecycle edges", () => {
+  test("bind failure (port already in use) releases the lease — immediate reacquire succeeds", () => {
+    const root = mkdtempSync(join(tmpdir(), "maw-fe-bindfail-"));
+    const occupant = startFinalEventServer({ port: 18951, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: mkdtempSync(join(tmpdir(), "maw-fe-occ-")) });
+    servers.push(occupant);
+    // Same PORT as the occupant, fresh root: Bun.serve must throw, and the lease
+    // taken moments earlier must NOT be left behind.
+    expect(() => startFinalEventServer({ port: 18951, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: root })).toThrow();
+    // Negative immediate reacquire: works right away, no stale-heartbeat wait.
+    const survivor = startFinalEventServer({ port: 18952, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: root });
+    servers.push(survivor);
+    expect(survivor.port).toBe(18952);
+  });
+
+  test("stop() ordering: SAME port + SAME lease root restart succeeds immediately (listener stopped before lease released)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "maw-fe-order-"));
+    const first = startFinalEventServer({ port: 18953, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: root });
+    first.stop(true);
+    // If the lease were released BEFORE the listener stopped, this successor could
+    // acquire the lease while the old socket still holds the port — the bind here
+    // would then fail. Passing on the same port proves the ordering.
+    const second = startFinalEventServer({ port: 18953, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: root });
+    servers.push(second);
+    const res = await fetch("http://127.0.0.1:18953/health");
+    expect(res.status).toBe(200);
+  });
+
+  test("leaseRoot is REQUIRED — an empty value is refused before anything binds", () => {
+    expect(() => startFinalEventServer({ port: 18954, store: new InMemoryFinalEventStore(), secrets: SECRETS, leaseRoot: "" })).toThrow("leaseRoot required");
+  });
+});
+
+describe("review r1 — distinct lease roots across daemons", () => {
+  test("three distinct roots pass", () => {
+    const r = assertDistinctLeaseRoots({ A: "/tmp/a", B: "/tmp/b", C: "/tmp/c" });
+    expect(r.code).toBe(0);
+    expect(r.message).toContain("3 lease root(s) distinct");
+  });
+  test("collision (same path, even via non-normalized spelling) is rejected and NAMES both daemons", () => {
+    const r = assertDistinctLeaseRoots({ MAW_BROKER_STORE_ROOT: "/tmp/x", MAW_PIPECAT_RECEIPT_STORE_ROOT: "/tmp/../tmp/x" });
+    expect(r.code).toBe(1);
+    expect(r.message).toContain("MAW_BROKER_STORE_ROOT");
+    expect(r.message).toContain("MAW_PIPECAT_RECEIPT_STORE_ROOT");
+  });
+  test("undefined roots are not collisions (a daemon not deployed is not a conflict)", () => {
+    expect(assertDistinctLeaseRoots({ A: "/tmp/only", B: undefined, C: undefined }).code).toBe(0);
   });
 });

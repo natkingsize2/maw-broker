@@ -131,10 +131,9 @@ and command broker, which each self-enforce via `PersistentLease`.
   lsof -nP -iTCP -sTCP:LISTEN | grep ":<MAW_PIPECAT_RECEIPT_PORT>"   # exactly ONE
   ps -eo pid,ppid,command | grep -c "final-event-server.ts"            # exactly 1 (plus grep)
   ```
-- **If a second instance is ever required** (e.g. horizontal scaling), `PersistentLease` must
-  be added to `final-event-server.ts`'s `main()` FIRST, following the exact pattern
-  `MirrorService`/`BrokerRunner` already use — this is a code change, not a supervisor
-  workaround, and is out of scope for this cutover.
+- ~~If a second instance is ever required, PersistentLease must be added first~~ — DONE
+  (review r1): the lease is now required at construction; horizontal scaling would need a
+  sharded-store design, which remains out of scope.
 
 ---
 
@@ -197,9 +196,9 @@ the process actually listening, and its `startedAt` must agree with `ps -o lstar
 60s PID-reuse tolerance already tested in `test/lease-pid-reuse.test.ts`). This is the SAME
 tradeoff and the SAME check already proven, not a new mechanism.
 
-`final-event-server.ts` has no lease file (Phase 2's known gap) — its PID identity check is
-`ps` against the supervisor's own record only (no independent durable cross-check exists for
-this daemon yet).
+`final-event-server.ts` DOES hold a `runner.lease` as of review r1 (leaseRoot required on
+every construction path) — its PID identity cross-check is the same lease-vs-`ps` comparison as
+the other daemons. (Earlier text claiming "no lease file" was made stale by the r1 patch.)
 
 **Loopback health receiver checks — real HTTP, from OUTSIDE the process (field rule 2: verify
 outside the tool, never by its own status):**
@@ -298,3 +297,10 @@ file specifically, the rest already existed from the reviewed branches this runb
   tarball needed for a clean committed tree. **Rollback**: `git checkout f960470e...` (or revert
   this commit). No durable-store format changed; a rollback needs no store migration. Nothing
   here creates secrets, edits live routes, starts daemons, or touches Discord/token config.
+
+- **2026-08-14 11:5x (review r1 patch)**: bind-failure now releases the lease immediately
+  (negative reacquire proven); `stop()` stops the listener BEFORE releasing the lease
+  (same-port+same-root restart proof); `leaseRoot` REQUIRED on every construction path;
+  dry-run reacquires ONE shared lease root every cycle; `assertDistinctLeaseRoots` added to the
+  preflight (env roots must be pairwise distinct after path normalization); this file's stale
+  "no lease" texts corrected. Rollback = revert this commit; no store migration.
