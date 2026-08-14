@@ -26,42 +26,44 @@ type Sink="discord"|"github"; type SinkState={status:"pending"|"delivered";idemp
 type RecordRow={event:AgentEvent&{kind:AgentEventKind};eventDigest:string;receipt:AgentEventReceipt;sinks:Record<Sink,SinkState>};
 type AuditRow={at:string;action:"queued"|"sink-delivered"|"accepted"|"replay"|"conflict";idempotencyKey:string;eventDigest:string;sink?:Sink;prevHash:string|null;hash:string};
 type NonceRow={requestDigest:string;issuedAt:string};type Core={version:3;records:Record<string,RecordRow>;audit:AuditRow[];nonces:Record<string,NonceRow>}; type Snapshot=Core&{snapshotMac:string};
+export type LeaseProbe={pid:number;alive:(pid:number)=>boolean;startTime:(pid:number)=>number|undefined;now:()=>number};
 function safeRoot(root:string){if(resolve(root)!==root)throw new Error("agent-event store root must be absolute");if(!existsSync(root))mkdirSync(root,{mode:0o700});let part=root;for(;;){const s=lstatSync(part);if(!s.isDirectory()||s.isSymbolicLink())throw new Error("agent-event store ancestry unsafe");if(part===root&&(s.uid!==process.getuid()||(s.mode&0o077)!==0))throw new Error("agent-event store root unsafe");if(part!==root&&(s.mode&0o002)!==0&&(s.mode&0o1000)===0)throw new Error("agent-event store ancestry unsafe");const next=dirname(part);if(next===part)break;part=next;}}
 function safeRead(path:string){const a=lstatSync(path);if(!a.isFile()||a.isSymbolicLink()||a.uid!==process.getuid()||(a.mode&0o777)!==0o600||a.nlink!==1)throw new Error("agent-event snapshot unsafe");const fd=openSync(path,constants.O_RDONLY|((constants as any).O_NOFOLLOW??0));try{const b=fstatSync(fd);if(b.ino!==a.ino||b.dev!==a.dev||!b.isFile()||b.nlink!==1)throw new Error("agent-event snapshot raced");return readFileSync(fd,"utf8");}finally{closeSync(fd);}}
 class Lease {
   private fd!: number;
   private inode!: number;
   private readonly token = randomUUID();
-  private readonly startedAt = processStartedAt(process.pid) ?? Date.now();
+  private readonly startedAt:number;
   private heartbeat = 0;
   readonly path: string;
-  constructor(root: string) {
+  constructor(root:string,private readonly probe:LeaseProbe={pid:process.pid,alive:pid=>{try{process.kill(pid,0);return true}catch{return false}},startTime:processStartedAt,now:Date.now}) {
+    this.startedAt=probe.startTime(probe.pid)??probe.now();
     this.path = `${root}/writer.lease`;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         this.fd = openSync(this.path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | ((constants as any).O_NOFOLLOW ?? 0), 0o600);
-        this.inode=fstatSync(this.fd).ino;this.write(Date.now());return;
+        this.inode=fstatSync(this.fd).ino;this.write(this.probe.now());return;
       } catch {
         let owner:{pid:number;startedAt:number;heartbeat:number;token:string};
         try { owner=JSON.parse(safeRead(this.path));if(!owner||!Number.isSafeInteger(owner.pid)||!Number.isSafeInteger(owner.startedAt)||!Number.isSafeInteger(owner.heartbeat)||typeof owner.token!=="string")throw Error(); } catch { throw new Error("agent-event writer lease corrupt"); }
-        let alive=true;try{process.kill(owner.pid,0)}catch{alive=false}const actual=alive?processStartedAt(owner.pid):undefined;const reused=actual!==undefined&&Math.abs(actual-owner.startedAt)>60_000;
-        if(!alive||(reused&&Date.now()-owner.heartbeat>30_000)){unlinkSync(this.path);continue;}
+        const alive=this.probe.alive(owner.pid),actual=alive?this.probe.startTime(owner.pid):undefined,reused=actual!==undefined&&Math.abs(actual-owner.startedAt)>60_000;
+        if(!alive||(reused&&this.probe.now()-owner.heartbeat>30_000)){unlinkSync(this.path);continue;}
         throw new Error("agent-event writer lease held");
       }
     }
     throw new Error("agent-event writer lease unavailable");
   }
-  refresh(){const raw=JSON.parse(safeRead(this.path));const st=lstatSync(this.path);if(st.ino!==this.inode||raw.pid!==process.pid||raw.startedAt!==this.startedAt||raw.token!==this.token)throw new Error("agent-event writer lease lost");this.write(Date.now());}
-  private write(heartbeat:number){this.heartbeat=heartbeat;ftruncateSync(this.fd,0);fchmodSync(this.fd,0o600);writeSync(this.fd,canonicalJson({pid:process.pid,startedAt:this.startedAt,heartbeat,token:this.token})+"\n",0,"utf8");fsyncSync(this.fd);}
-  close(){try{const raw=JSON.parse(safeRead(this.path));const st=lstatSync(this.path);if(st.ino===this.inode&&raw.pid===process.pid&&raw.startedAt===this.startedAt&&raw.heartbeat===this.heartbeat&&raw.token===this.token)unlinkSync(this.path);}catch{}finally{closeSync(this.fd);}}
+  refresh(){const raw=JSON.parse(safeRead(this.path));const st=lstatSync(this.path);if(st.ino!==this.inode||raw.pid!==this.probe.pid||raw.startedAt!==this.startedAt||raw.token!==this.token)throw new Error("agent-event writer lease lost");this.write(this.probe.now());}
+  private write(heartbeat:number){this.heartbeat=heartbeat;ftruncateSync(this.fd,0);fchmodSync(this.fd,0o600);writeSync(this.fd,canonicalJson({pid:this.probe.pid,startedAt:this.startedAt,heartbeat,token:this.token})+"\n",0,"utf8");fsyncSync(this.fd);}
+  close(){try{const raw=JSON.parse(safeRead(this.path));const st=lstatSync(this.path);if(st.ino===this.inode&&raw.pid===this.probe.pid&&raw.startedAt===this.startedAt&&raw.heartbeat===this.heartbeat&&raw.token===this.token)unlinkSync(this.path);}catch{}finally{closeSync(this.fd);}}
 }
 function processStartedAt(pid:number){try{const out=execFileSync("ps",["-p",String(pid),"-o","etime="],{encoding:"utf8"}).trim();const m=/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(out);if(!m)return undefined;const elapsed=(((Number(m[1]??0)*24+Number(m[2]??0))*60+Number(m[3]))*60+Number(m[4]))*1000;return Date.now()-elapsed;}catch{return undefined;}}
 export class AgentEventLedger {
   private records = new Map<string, RecordRow>(); private audit: AuditRow[] = [];
   private nonces = new Map<string,NonceRow>(); private lease?: Lease; private serial: Promise<void> = Promise.resolve();
-  constructor(private registry:ProjectRegistry,private emitter:OutboundEmitter,private path?:string,private now:()=>string=()=>new Date().toISOString(),private authority?:IngressAuthority,private storeKey?:Buffer){
+  constructor(private registry:ProjectRegistry,private emitter:OutboundEmitter,private path?:string,private now:()=>string=()=>new Date().toISOString(),private authority?:IngressAuthority,private storeKey?:Buffer,leaseProbe?:LeaseProbe){
     if(authority) strongKey(authority.key);
-    if(path){if(!storeKey)throw new Error("agent-event store MAC key required");if(typeof emitter.hasDiscord!=="function"||typeof emitter.hasGitHub!=="function")throw new Error("agent-event idempotent sink reconciliation required");strongKey(storeKey);const root=dirname(path);safeRoot(root);if(basename(path)!=="ledger.json")throw new Error("agent-event snapshot name invalid");this.lease=new Lease(root);try{if(existsSync(path))this.load();}catch(e){this.close();throw e;}}
+    if(path){if(!storeKey)throw new Error("agent-event store MAC key required");if(typeof emitter.hasDiscord!=="function"||typeof emitter.hasGitHub!=="function")throw new Error("agent-event idempotent sink reconciliation required");strongKey(storeKey);const root=dirname(path);safeRoot(root);if(basename(path)!=="ledger.json")throw new Error("agent-event snapshot name invalid");this.lease=new Lease(root,leaseProbe);try{if(existsSync(path))this.load();}catch(e){this.close();throw e;}}
   }
   close(){this.lease?.close();this.lease=undefined;}
   private mac(core:Core){return createHmac("sha256",this.storeKey!).update(canonicalJson(core)).digest("hex");}
