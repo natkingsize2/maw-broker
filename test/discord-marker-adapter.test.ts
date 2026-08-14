@@ -115,13 +115,13 @@ describe("bounded pagination", () => {
     expect(found).toEqual({ messageId: older.id });
     expect(port.getCalls).toBeGreaterThanOrEqual(2);
   });
-  test("stops at maxScan: a marker buried deeper than the bound is reported as absent, scan count proves the bound", async () => {
+  test("full pages through maxScan HOLD because absence is not authoritative", async () => {
     const port = new FakeChannelPort();
     const buried = row({ content: MARKER });
     const noise: Row[] = [];
     for (let i = 0; i < 110; i++) noise.push(row({ content: `noise ${i}`, author: { id: OUTSIDER } }));
     port.rows = [...noise.sort((a, b) => Number(BigInt(b.id) - BigInt(a.id))), buried];
-    expect(await adapter(port, 100).findAuthoritative()).toBeUndefined();
+    await expect(adapter(port, 100).findAuthoritative()).rejects.toThrow("pagination exhausted");
     expect(port.getCalls).toBe(2); // 100/50 pages, not one more
   });
   test("a port that repeats the same page cannot loop the adapter past its bound", async () => {

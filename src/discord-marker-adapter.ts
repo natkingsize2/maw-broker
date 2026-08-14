@@ -72,18 +72,22 @@ export class DiscordAuthoritativeMarkerAdapter {
   async findAuthoritative(): Promise<{ messageId: string } | undefined> {
     const matches: string[] = [];
     let before: string | undefined;
+    let terminal = false;
     for (let scanned = 0; scanned < this.maxScan; scanned += 50) {
       const rows = await this.port.getMessages(this.channelId, undefined, 50, before);
-      if (!Array.isArray(rows) || rows.length === 0) break;
+      if (!Array.isArray(rows)) throw new Error("marker lookup response invalid");
+      if (rows.length === 0) { terminal = true; break; }
       for (const row of rows) {
         const hit = this.isOwnAuthoritativeRow(row);
         if (hit) matches.push(hit.messageId);
       }
       if (matches.length > 1) throw new MarkerHoldError(matches);
+      if (rows.length < 50) { terminal = true; break; }
       const oldest = rows[rows.length - 1] as { id?: unknown };
       if (typeof oldest?.id !== "string" || oldest.id === before) break; // no cursor progress → stop, stay bounded
       before = oldest.id;
     }
+    if (!terminal && matches.length === 0) throw new Error("marker lookup pagination exhausted");
     return matches.length === 1 ? { messageId: matches[0]! } : undefined;
   }
 

@@ -87,7 +87,8 @@ export function startAgentEventServer(options: AgentEventServerOptions) {
 if (import.meta.main) {
   const { loadAgentEventDaemonConfig } = await import("./agent-event-daemon");
   const { loadProjectRoutesFile, ProjectRegistry: Registry } = await import("./project-routes");
-  const { loadGitHubMarkerSecrets, GitHubRestClient, githubMarkerEmitter } = await import("./adapter-github");
+  const { loadGitHubMarkerSecrets, GitHubRestClient } = await import("./adapter-github");
+  const { BridgeHttpClient, loadBridgeClientConfig } = await import("./bridge-client");
   const port = Number(process.env.MAW_AGENT_EVENT_PORT ?? "8793");
   const routesPath = process.env.MAW_PROJECT_ROUTES_FILE;
   const storePath = process.env.MAW_AGENT_EVENT_STORE_PATH;
@@ -95,16 +96,9 @@ if (import.meta.main) {
   const config = loadAgentEventDaemonConfig(process.env);
   const registry = new Registry(loadProjectRoutesFile(routesPath));
   const githubClient = new GitHubRestClient(loadGitHubMarkerSecrets().token);
-  // Discord sink stays unimplemented/out of scope in THIS entrypoint (owner: "GitHub marker
-  // adapter ONLY" — Discord's real OutboundEmitter half is a separate task). Refusing loudly
-  // on first use rather than silently no-op-ing matches this codebase's own rule: no emitter
-  // method may fail invisibly (see agent-event-ledger.ts's `hasDiscord`/`hasGitHub` guard in
-  // its own constructor, which already refuses to construct a durable ledger without both).
-  const emitter: OutboundEmitter = {
-    ...githubMarkerEmitter(githubClient),
-    async emitDiscord() { throw new Error("agent-event server: discord sink not wired in this entrypoint"); },
-    async hasDiscord() { throw new Error("agent-event server: discord sink not wired in this entrypoint"); },
-  };
+  const bridgeConfig=loadBridgeClientConfig(process.env),discordSelfId=process.env.MAW_AGENT_EVENT_DISCORD_SELF_ID;
+  if(!discordSelfId||!/^\d{17,20}$/.test(discordSelfId))throw new Error("agent-event server discord identity invalid");
+  const emitter=composeAgentEventEmitter(new BridgeHttpClient(bridgeConfig.bridgeUrl,bridgeConfig.localAuthToken),discordSelfId,githubClient);
   const server = startAgentEventServer({ port, registry, emitter, storePath, config });
   const stop = () => { server.stop(); process.exit(0); };
   process.on("SIGINT", stop); process.on("SIGTERM", stop);

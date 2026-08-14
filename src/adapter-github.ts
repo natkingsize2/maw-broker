@@ -11,7 +11,8 @@
  * same way (`found = await hasX(...); if (found !== true) await emitX(...)`) without needing to
  * know which sink it's talking to.
  */
-import { lstatSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { retryAfterMs, retryDecision } from "./retry";
 import type { OutboundEmitter } from "./agent-event-ledger";
 
@@ -33,8 +34,7 @@ export function loadGitHubMarkerSecrets(env: Record<string, string | undefined> 
     let values: Record<string, string | undefined> = env;
     const path = env.MAW_AGENT_EVENT_GITHUB_SECRETS_FILE;
     if (path) {
-      if (lstatSync(path).isSymbolicLink() || (statSync(path).mode & 0o777) !== 0o600) throw new Error();
-      values = JSON.parse(readFileSync(path, "utf8"));
+      if(resolve(path)!==path)throw new Error();for(let parent=dirname(path);;){const s=lstatSync(parent);if(!s.isDirectory()||s.isSymbolicLink())throw new Error();const next=dirname(parent);if(next===parent)break;parent=next;}const before=lstatSync(path);if(before.isSymbolicLink()||!before.isFile()||(before.mode&0o777)!==0o600)throw new Error();const fd=openSync(path,constants.O_RDONLY|((constants as any).O_NOFOLLOW??0));try{const after=fstatSync(fd);if(after.ino!==before.ino||after.dev!==before.dev||after.nlink!==1)throw new Error();values=JSON.parse(readFileSync(fd,"utf8"));}finally{closeSync(fd)}
     }
     const token = values.MAW_AGENT_EVENT_GITHUB_TOKEN;
     if (typeof token !== "string" || !token) throw new Error();
@@ -99,6 +99,7 @@ export class GitHubRestClient {
     const me = await this.getSelfId();
     const matches: number[] = [];
     const perPage = 100;
+    let terminal = false;
     for (let page = 1; (page - 1) * perPage < maxScan; page++) {
       const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments?per_page=${perPage}&page=${page}`;
       let response: FetchResponse;
@@ -112,13 +113,14 @@ export class GitHubRestClient {
       }
       const rows = (await response.json()) as Array<{ id?: unknown; body?: unknown; user?: { id?: unknown } }>;
       if (!Array.isArray(rows)) throw new Error("github REST response invalid");
-      if (rows.length === 0) break;
+      if (rows.length === 0) { terminal = true; break; }
       for (const row of rows) {
-        if (typeof row?.id === "number" && row.user?.id === me && typeof row.body === "string" && row.body.includes(marker)) matches.push(row.id);
+        if (typeof row?.id === "number" && row.user?.id === me && typeof row.body === "string" && row.body.split(/\r?\n/).some(line=>line===`<!-- ${marker} -->`)) matches.push(row.id);
       }
       if (matches.length > 1) throw new Error("ambiguous github marker comments");
-      if (rows.length < perPage) break;
+      if (rows.length < perPage) { terminal = true; break; }
     }
+    if (!terminal && matches.length === 0) throw new Error("github marker pagination exhausted");
     return matches.length === 1 ? { commentId: matches[0]! } : undefined;
   }
   /** POST a new comment; returns the created comment id. This is never called until the

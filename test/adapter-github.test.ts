@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitHubRestClient, githubMarkerEmitter, loadGitHubMarkerSecrets, parseIssueRef } from "../src/adapter-github";
@@ -58,7 +58,7 @@ describe("parseIssueRef — exact repo/issue marker parsing", () => {
 
 describe("GitHubRestClient.findMarkedComment — authenticated bot actor + outsider ignore", () => {
   test("comment from the authenticated bot containing the marker is found", async () => {
-    const { fetcher } = fakeGitHub({ selfId: BOT_ID, pages: [[{ id: 1, body: "hello <!-- marker-a -->", user: { id: BOT_ID } }]] });
+    const { fetcher } = fakeGitHub({ selfId: BOT_ID, pages: [[{ id: 1, body: "hello\n<!-- marker-a -->", user: { id: BOT_ID } }]] });
     const client = new GitHubRestClient("t", fetcher, noSleep);
     await expect(client.findMarkedComment(ISSUE, "marker-a")).resolves.toEqual({ commentId: 1 });
   });
@@ -86,8 +86,8 @@ describe("GitHubRestClient.findMarkedComment — authenticated bot actor + outsi
 describe("GitHubRestClient.findMarkedComment — ambiguity HOLD", () => {
   test("two bot comments both containing the same marker: throws ambiguous, does not guess", async () => {
     const { fetcher } = fakeGitHub({ selfId: BOT_ID, pages: [[
-      { id: 1, body: "first <!-- marker-a -->", user: { id: BOT_ID } },
-      { id: 2, body: "second <!-- marker-a -->", user: { id: BOT_ID } },
+      { id: 1, body: "first\n<!-- marker-a -->", user: { id: BOT_ID } },
+      { id: 2, body: "second\n<!-- marker-a -->", user: { id: BOT_ID } },
     ]] });
     const client = new GitHubRestClient("t", fetcher, noSleep);
     await expect(client.findMarkedComment(ISSUE, "marker-a")).rejects.toThrow("ambiguous github marker comments");
@@ -97,8 +97,8 @@ describe("GitHubRestClient.findMarkedComment — ambiguity HOLD", () => {
     const { fetcher, calls } = fakeGitHub({
       selfId: BOT_ID,
       pages: [
-        [{ id: 1, body: "a <!-- marker-a -->", user: { id: BOT_ID } }, { id: 2, body: "b <!-- marker-a -->", user: { id: BOT_ID } }, ...Array.from({ length: 98 }, (_, i) => ({ id: 100 + i, body: "filler", user: { id: BOT_ID } }))],
-        [{ id: 3, body: "c <!-- marker-a -->", user: { id: BOT_ID } }],
+        [{ id: 1, body: "a\n<!-- marker-a -->", user: { id: BOT_ID } }, { id: 2, body: "b\n<!-- marker-a -->", user: { id: BOT_ID } }, ...Array.from({ length: 98 }, (_, i) => ({ id: 100 + i, body: "filler", user: { id: BOT_ID } }))],
+        [{ id: 3, body: "c\n<!-- marker-a -->", user: { id: BOT_ID } }],
       ],
     });
     const client = new GitHubRestClient("t", fetcher, noSleep);
@@ -110,7 +110,7 @@ describe("GitHubRestClient.findMarkedComment — ambiguity HOLD", () => {
 describe("GitHubRestClient.findMarkedComment — pagination", () => {
   test("marker on page 2 (page 1 full at 100, no match) is found, and both pages were queried for the exact issue", async () => {
     const page1: Comment[] = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, body: "filler", user: { id: BOT_ID } }));
-    const page2: Comment[] = [{ id: 200, body: "found <!-- marker-b -->", user: { id: BOT_ID } }];
+    const page2: Comment[] = [{ id: 200, body: "found\n<!-- marker-b -->", user: { id: BOT_ID } }];
     const { fetcher, calls } = fakeGitHub({ selfId: BOT_ID, pages: [page1, page2] });
     const client = new GitHubRestClient("t", fetcher, noSleep);
     await expect(client.findMarkedComment(ISSUE, "marker-b")).resolves.toEqual({ commentId: 200 });
@@ -121,12 +121,12 @@ describe("GitHubRestClient.findMarkedComment — pagination", () => {
     expect(commentCalls[1]!.url).toContain("page=2");
   });
 
-  test("maxScan bounds pagination: a marker only on page 2 is NOT found when maxScan caps scanning at page 1", async () => {
+  test("maxScan full-page exhaustion HOLD rather than false absence", async () => {
     const page1: Comment[] = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, body: "filler", user: { id: BOT_ID } }));
     const page2: Comment[] = [{ id: 200, body: "found <!-- marker-c -->", user: { id: BOT_ID } }];
     const { fetcher, calls } = fakeGitHub({ selfId: BOT_ID, pages: [page1, page2] });
     const client = new GitHubRestClient("t", fetcher, noSleep);
-    await expect(client.findMarkedComment(ISSUE, "marker-c", 100)).resolves.toBeUndefined();
+    await expect(client.findMarkedComment(ISSUE, "marker-c", 100)).rejects.toThrow("pagination exhausted");
     expect(calls.filter((c) => c.url.includes("page=2")).length).toBe(0);
   });
 
@@ -283,7 +283,7 @@ describe("loadGitHubMarkerSecrets — 0600/no-symlink secret file handling", () 
     expect(() => loadGitHubMarkerSecrets({ MAW_AGENT_EVENT_GITHUB_SECRETS_FILE: path })).toThrow("github marker adapter configuration invalid");
   });
   test("valid 0600 secrets file loads correctly", () => {
-    const root = mkdtempSync(join(tmpdir(), "maw-gh-secret-good-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "maw-gh-secret-good-")));
     const path = join(root, "secrets.json");
     writeFileSync(path, JSON.stringify({ MAW_AGENT_EVENT_GITHUB_TOKEN: "t-from-file" }), { mode: 0o600 });
     expect(loadGitHubMarkerSecrets({ MAW_AGENT_EVENT_GITHUB_SECRETS_FILE: path })).toEqual({ token: "t-from-file" });
